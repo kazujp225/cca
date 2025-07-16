@@ -64,7 +64,15 @@ const authenticateWebSocket = (token) => {
   
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    return decoded;
+    
+    // Verify user still exists and is active
+    const user = userDb.getUserById(decoded.userId);
+    if (!user) {
+      console.error('WebSocket auth: User not found for ID:', decoded.userId);
+      return null;
+    }
+    
+    return user;
   } catch (error) {
     console.error('WebSocket token verification error:', error);
     return null;

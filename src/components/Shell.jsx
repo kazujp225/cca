@@ -453,14 +453,14 @@ function Shell({ selectedProject, selectedSession, isActive }) {
         // If the config returns localhost but we're not on localhost, use current host but with API server port
         if (wsBaseUrl.includes('localhost') && !window.location.hostname.includes('localhost')) {
           const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          // For development, API server is typically on port 3002 when Vite is on 3001
-          const apiPort = window.location.port === '3001' ? '3002' : window.location.port;
+          // For development, API server is typically on port 6666 when Vite is on 3000/5173
+          const apiPort = (window.location.port === '6667' || window.location.port === '3000' || window.location.port === '5173') ? '6666' : window.location.port;
           wsBaseUrl = `${protocol}//${window.location.hostname}:${apiPort}`;
         }
       } catch (error) {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // For development, API server is typically on port 3002 when Vite is on 3001
-        const apiPort = window.location.port === '3001' ? '3002' : window.location.port;
+        // For development, API server is typically on port 6666 when Vite is on 3000/5173
+        const apiPort = (window.location.port === '6667' || window.location.port === '3000' || window.location.port === '5173') ? '6666' : window.location.port;
         wsBaseUrl = `${protocol}//${window.location.hostname}:${apiPort}`;
       }
       

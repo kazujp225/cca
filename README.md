@@ -62,7 +62,8 @@ npm run dev
 ```
 
 5. **ブラウザでアクセス**
-   - 開発環境: `http://localhost:3001`
+   - 開発環境: `http://localhost:6667`
+   - APIサーバー: `http://localhost:6666` (内部使用)
 
 ## 🛡️ セキュリティ設定
 

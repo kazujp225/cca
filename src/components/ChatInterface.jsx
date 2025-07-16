@@ -65,12 +65,12 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
   return (
     <div
       ref={messageRef}
-      className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
+      className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'} transition-all duration-200`}
     >
       {message.type === 'user' ? (
         /* User message bubble on the right */
         <div className="flex items-end space-x-0 sm:space-x-3 w-full sm:w-auto sm:max-w-[85%] md:max-w-md lg:max-w-lg xl:max-w-xl">
-          <div className="bg-blue-600 text-white rounded-2xl rounded-br-md px-3 sm:px-4 py-2 shadow-sm flex-1 sm:flex-initial">
+          <div className="bg-blue-600 text-white rounded-2xl rounded-br-md px-3 sm:px-4 py-2 shadow-sm flex-1 sm:flex-initial transition-all duration-200 hover:shadow-md">
             <div className="text-sm whitespace-pre-wrap break-words">
               {message.content}
             </div>
@@ -1942,6 +1942,14 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     const toolsSettings = getToolsSettings();
 
     // Send command to Claude CLI via WebSocket with images
+    console.log('🚀 Sending message to Claude CLI:', {
+      type: 'claude-command',
+      command: input.substring(0, 100) + (input.length > 100 ? '...' : ''),
+      projectPath: selectedProject.path,
+      sessionId: currentSessionId,
+      resume: !!currentSessionId
+    });
+    
     sendMessage({
       type: 'claude-command',
       command: input,
@@ -2135,7 +2143,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         {/* Messages Area - Scrollable Middle Section */}
       <div 
         ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto overflow-x-hidden px-0 py-3 sm:p-4 space-y-3 sm:space-y-4 relative"
+        className="flex-1 overflow-y-auto overflow-x-hidden px-0 py-3 sm:p-4 space-y-3 sm:space-y-4 relative scroll-smooth"
       >
         {isLoadingSessionMessages && chatMessages.length === 0 ? (
           <div className="text-center text-gray-500 dark:text-gray-400 mt-8">

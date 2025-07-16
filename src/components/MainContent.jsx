@@ -17,6 +17,7 @@ import FileTree from './FileTree';
 import CodeEditor from './CodeEditor';
 import Shell from './Shell';
 import GitPanel from './GitPanel';
+import LivePreviewPanel from './LivePreviewPanel';
 import ParticleBackground from './ParticleBackground';
 import { useTheme } from '../contexts/ThemeContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -48,6 +49,10 @@ function MainContent({
   const { isDarkMode, toggleDarkMode } = useTheme();
   const { logout } = useAuth();
   const [editingFile, setEditingFile] = useState(null);
+  const [serverStatus, setServerStatus] = useState('stopped');
+  const [serverUrl, setServerUrl] = useState(null);
+  const [serverLogs, setServerLogs] = useState([]);
+  const [currentScript, setCurrentScript] = useState(null);
 
   const handleFileOpen = (filePath, diffInfo = null) => {
     // Create a file object that CodeEditor expects
@@ -63,6 +68,58 @@ function MainContent({
   const handleCloseEditor = () => {
     setEditingFile(null);
   };
+
+  // Server management handlers
+  const handleStartServer = (script) => {
+    setCurrentScript(script);
+    setServerStatus('starting');
+    setServerLogs([]);
+    console.log('Starting server with script:', script);
+  };
+
+  const handleStopServer = () => {
+    setServerStatus('stopping');
+    console.log('Stopping server');
+  };
+
+  const handleScriptSelect = (script) => {
+    setCurrentScript(script);
+  };
+
+  const handleClearLogs = () => {
+    setServerLogs([]);
+  };
+
+  // WebSocket message handling for server management
+  useEffect(() => {
+    if (!messages) return;
+
+    const latestMessage = messages[messages.length - 1];
+    if (latestMessage && latestMessage.type) {
+      switch (latestMessage.type) {
+        case 'server:starting':
+          setServerStatus('starting');
+          break;
+        case 'server:running':
+          setServerStatus('running');
+          setServerUrl(latestMessage.url);
+          break;
+        case 'server:stopped':
+          setServerStatus('stopped');
+          setServerUrl(null);
+          break;
+        case 'server:error':
+          setServerStatus('error');
+          break;
+        case 'server:log':
+          setServerLogs(prev => [...prev, {
+            timestamp: new Date(),
+            message: latestMessage.log
+          }]);
+          break;
+      }
+    }
+  }, [messages]);
   if (isLoading) {
     return (
       <div className="h-full flex flex-col">
@@ -277,9 +334,9 @@ function MainContent({
                   <span className="hidden sm:inline">ソース管理</span>
                 </span>
               </button>
-               {/* <button
+              <button
                 onClick={() => setActiveTab('preview')}
-                className={`relative px-2 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
+                className={`relative px-2 sm:px-3 py-1 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
                   activeTab === 'preview'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700'
@@ -289,9 +346,9 @@ function MainContent({
                   <svg className="w-3 sm:w-3.5 h-3 sm:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 919-9" />
                   </svg>
-                  <span className="hidden sm:inline">Preview</span>
+                  <span className="hidden sm:inline">プレビュー</span>
                 </span>
-              </button> */}
+              </button>
               </div>
             </div>
           </div>
@@ -336,30 +393,18 @@ function MainContent({
           <GitPanel selectedProject={selectedProject} isMobile={isMobile} />
         </div>
         <div className={`h-full overflow-hidden ${activeTab === 'preview' ? 'block' : 'hidden'}`}>
-          {/* <LivePreviewPanel
+          <LivePreviewPanel
             selectedProject={selectedProject}
+            isMobile={isMobile}
             serverStatus={serverStatus}
             serverUrl={serverUrl}
-            availableScripts={availableScripts}
-            onStartServer={(script) => {
-              sendMessage({
-                type: 'server:start',
-                projectPath: selectedProject?.fullPath,
-                script: script
-              });
-            }}
-            onStopServer={() => {
-              sendMessage({
-                type: 'server:stop',
-                projectPath: selectedProject?.fullPath
-              });
-            }}
-            onScriptSelect={setCurrentScript}
-            currentScript={currentScript}
-            isMobile={isMobile}
             serverLogs={serverLogs}
-            onClearLogs={() => setServerLogs([])}
-          /> */}
+            currentScript={currentScript}
+            onStartServer={handleStartServer}
+            onStopServer={handleStopServer}
+            onScriptSelect={handleScriptSelect}
+            onClearLogs={handleClearLogs}
+          />
         </div>
       </div>
 

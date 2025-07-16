@@ -20,6 +20,27 @@ async function getActualProjectPath(projectName) {
 }
 
 // Helper function to validate git repository
+async function isGitRepository(projectPath) {
+  try {
+    // Check if directory exists
+    await fs.access(projectPath);
+  } catch {
+    return false;
+  }
+
+  try {
+    // Use --show-toplevel to get the root of the git repository
+    const { stdout: gitRoot } = await execAsync('git rev-parse --show-toplevel', { cwd: projectPath });
+    const normalizedGitRoot = path.resolve(gitRoot.trim());
+    const normalizedProjectPath = path.resolve(projectPath);
+    
+    // Ensure the git root matches our project path (prevent using parent git repos)
+    return normalizedGitRoot === normalizedProjectPath;
+  } catch {
+    return false;
+  }
+}
+
 async function validateGitRepository(projectPath) {
   try {
     // Check if directory exists
@@ -58,8 +79,15 @@ router.get('/status', async (req, res) => {
     const projectPath = await getActualProjectPath(project);
     console.log('Git status for project:', project, '-> path:', projectPath);
     
-    // Validate git repository
-    await validateGitRepository(projectPath);
+    // Check if it's a git repository
+    const isGit = await isGitRepository(projectPath);
+    if (!isGit) {
+      return res.json({
+        success: true,
+        isGitRepository: false,
+        message: 'Not a git repository. Initialize with "git init" to use source control features.'
+      });
+    }
 
     // Get current branch
     const { stdout: branch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
@@ -430,7 +458,16 @@ router.get('/remote-status', async (req, res) => {
 
   try {
     const projectPath = await getActualProjectPath(project);
-    await validateGitRepository(projectPath);
+    
+    // Check if it's a git repository
+    const isGit = await isGitRepository(projectPath);
+    if (!isGit) {
+      return res.json({
+        success: true,
+        isGitRepository: false,
+        message: 'Not a git repository. Initialize with "git init" to use source control features.'
+      });
+    }
 
     // Get current branch
     const { stdout: currentBranch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });

@@ -19,7 +19,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, useNavigate, useParams } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+import './styles/optimizedChat.css';
 import Sidebar from './components/Sidebar';
 import MainContent from './components/MainContent';
 import MobileNav from './components/MobileNav';
@@ -40,7 +41,6 @@ import { api } from './utils/api';
 // Main App component with routing
 function AppContent() {
   const navigate = useNavigate();
-  const { sessionId } = useParams();
   
   const { updateAvailable, latestVersion, currentVersion } = useVersionCheck('siteboon', 'claudecodeui');
   const [showVersionModal, setShowVersionModal] = useState(false);
@@ -238,34 +238,11 @@ function AppContent() {
   // Expose fetchProjects globally for component access
   window.refreshProjects = fetchProjects;
 
-  // Handle URL-based session loading
-  useEffect(() => {
-    if (sessionId && projects.length > 0) {
-      // Only switch tabs on initial load, not on every project update
-      const shouldSwitchTab = !selectedSession || selectedSession.id !== sessionId;
-      // Find the session across all projects
-      for (const project of projects) {
-        const session = project.sessions?.find(s => s.id === sessionId);
-        if (session) {
-          setSelectedProject(project);
-          setSelectedSession(session);
-          // Only switch to chat tab if we're loading a different session
-          if (shouldSwitchTab) {
-            setActiveTab('chat');
-          }
-          return;
-        }
-      }
-      
-      // If session not found, it might be a newly created session
-      // Just navigate to it and it will be found when the sidebar refreshes
-      // Don't redirect to home, let the session load naturally
-    }
-  }, [sessionId, projects, navigate]);
 
   const handleProjectSelect = (project) => {
     setSelectedProject(project);
     setSelectedSession(null);
+    // プロジェクト選択時は常にメインページに戻る
     navigate('/');
     if (isMobile) {
       setSidebarOpen(false);
@@ -282,7 +259,8 @@ function AppContent() {
     if (isMobile) {
       setSidebarOpen(false);
     }
-    navigate(`/session/${session.id}`);
+    // URLは変更しない - セッション選択は内部状態で管理
+    // navigate(`/session/${session.id}`);
   };
 
   const handleNewSession = (project) => {
@@ -596,7 +574,15 @@ function AppContent() {
           onSessionActive={markSessionAsActive}
           onSessionInactive={markSessionAsInactive}
           onReplaceTemporarySession={replaceTemporarySession}
-          onNavigateToSession={(sessionId) => navigate(`/session/${sessionId}`)}
+          onNavigateToSession={(sessionId) => {
+            // セッションIDで該当セッションを検索して選択
+            const session = projects.find(p => p.sessions?.some(s => s.id === sessionId))
+              ?.sessions?.find(s => s.id === sessionId);
+            if (session) {
+              setSelectedSession(session);
+              setActiveTab('chat');
+            }
+          }}
           onShowSettings={() => setShowToolsSettings(true)}
           autoExpandTools={autoExpandTools}
           showRawParameters={showRawParameters}
@@ -667,7 +653,6 @@ function App() {
           <Router>
             <Routes>
               <Route path="/" element={<AppContent />} />
-              <Route path="/session/:sessionId" element={<AppContent />} />
               <Route path="/usage" element={<UsageAnalytics />} />
             </Routes>
           </Router>

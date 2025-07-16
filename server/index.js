@@ -1,5 +1,5 @@
 // Load environment variables from .env file
-import fs from 'fs';
+import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -9,7 +9,7 @@ const __dirname = dirname(__filename);
 
 try {
   const envPath = path.join(__dirname, '../.env');
-  const envFile = fs.readFileSync(envPath, 'utf8');
+  const envFile = fsSync.readFileSync(envPath, 'utf8');
   envFile.split('\n').forEach(line => {
     const trimmedLine = line.trim();
     if (trimmedLine && !trimmedLine.startsWith('#')) {
@@ -29,7 +29,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import http from 'http';
 import cors from 'cors';
-import { promises as fsPromises } from 'fs';
+import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
 import os from 'os';
 import pty from 'node-pty';
@@ -44,7 +44,7 @@ import mcpRoutes from './routes/mcp.js';
 import helpChatRoutes from './helpChat.js';
 import { initializeDatabase } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
@@ -52,6 +52,9 @@ const execAsync = promisify(exec);
 // File system watcher for projects folder
 let projectsWatcher = null;
 const connectedClients = new Set();
+
+// Server process management
+const runningServers = new Map(); // projectPath -> { process, url, script, startTime }
 
 // Setup file system watcher for Claude projects folder using chokidar
 async function setupProjectsWatcher() {
@@ -143,7 +146,7 @@ const server = http.createServer(app);
 // Single WebSocket server that handles both paths
 const wss = new WebSocketServer({ 
   server,
-  verifyClient: (info) => {
+  verifyClient: (info, cb) => {
     console.log('WebSocket connection attempt to:', info.req.url);
     
     // Extract token from query parameters or headers
@@ -151,22 +154,49 @@ const wss = new WebSocketServer({
     const token = url.searchParams.get('token') || 
                   info.req.headers.authorization?.split(' ')[1];
     
+    console.log('Token found:', token ? 'Yes' : 'No');
+    
+    // For /shell endpoint, skip authentication
+    if (url.pathname === '/shell') {
+      console.log('✅ Shell WebSocket - skipping authentication');
+      cb(true);
+      return;
+    }
+    
     // Verify token
     const user = authenticateWebSocket(token);
     if (!user) {
-      console.log('❌ WebSocket authentication failed');
-      return false;
+      console.log('❌ WebSocket authentication failed for token:', token ? token.substring(0, 20) + '...' : 'null');
+      cb(false, 401, 'Unauthorized');
+      return;
     }
     
     // Store user info in the request for later use
     info.req.user = user;
     console.log('✅ WebSocket authenticated for user:', user.username);
-    return true;
+    cb(true);
   }
 });
 
-app.use(cors());
-app.use(express.json());
+// CORS configuration for production security
+const corsOptions = {
+  origin: process.env.NODE_ENV === 'production' 
+    ? [
+        'http://localhost:6667',
+        'https://your-domain.com', // Add your production domain here
+      ]
+    : [
+        'http://localhost:6667',
+        'http://127.0.0.1:6667',
+        'http://localhost:3001', // Legacy support
+        'http://127.0.0.1:3001'
+      ],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '10mb' })); // Limit payload size for security
 
 // Optional API key validation (if configured)
 app.use('/api', validateApiKey);
@@ -421,7 +451,7 @@ app.post('/api/projects/mkdir', authenticateToken, async (req, res) => {
     console.log('📁 Creating directory:', expandedPath);
     
     // Create directory with recursive flag to create parent directories if needed
-    await fsPromises.mkdir(expandedPath, { recursive: true });
+    await fs.mkdir(expandedPath, { recursive: true });
     
     res.json({ success: true, path: expandedPath });
   } catch (error) {
@@ -438,14 +468,14 @@ app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) =
     
     console.log('📄 File read request:', projectName, filePath);
     
-    // Using fsPromises from import
+    // Using fs from import
     
     // Security check - ensure the path is safe and absolute
     if (!filePath || !path.isAbsolute(filePath)) {
       return res.status(400).json({ error: 'Invalid file path' });
     }
     
-    const content = await fsPromises.readFile(filePath, 'utf8');
+    const content = await fs.readFile(filePath, 'utf8');
     res.json({ content, path: filePath });
   } catch (error) {
     console.error('Error reading file:', error);
@@ -477,7 +507,7 @@ app.get('/api/projects/:projectName/files/content', authenticateToken, async (re
     
     // Check if file exists
     try {
-      await fsPromises.access(filePath);
+      await fs.access(filePath);
     } catch (error) {
       return res.status(404).json({ error: 'File not found' });
     }
@@ -487,7 +517,7 @@ app.get('/api/projects/:projectName/files/content', authenticateToken, async (re
     res.setHeader('Content-Type', mimeType);
     
     // Stream the file
-    const fileStream = fs.createReadStream(filePath);
+    const fileStream = fsSync.createReadStream(filePath);
     fileStream.pipe(res);
     
     fileStream.on('error', (error) => {
@@ -513,7 +543,7 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
     
     console.log('💾 File save request:', projectName, filePath);
     
-    // Using fsPromises from import
+    // Using fs from import
     
     // Security check - ensure the path is safe and absolute
     if (!filePath || !path.isAbsolute(filePath)) {
@@ -527,16 +557,16 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
     // Ensure directory exists
     const dir = path.dirname(filePath);
     try {
-      await fsPromises.mkdir(dir, { recursive: true });
+      await fs.mkdir(dir, { recursive: true });
     } catch (mkdirError) {
       console.warn('Could not create directory:', mkdirError.message);
     }
     
     // Create backup of original file if it exists
     try {
-      await fsPromises.access(filePath);
+      await fs.access(filePath);
       const backupPath = filePath + '.backup.' + Date.now();
-      await fsPromises.copyFile(filePath, backupPath);
+      await fs.copyFile(filePath, backupPath);
       console.log('📋 Created backup:', backupPath);
     } catch (backupError) {
       // File doesn't exist, no backup needed
@@ -544,7 +574,7 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
     }
     
     // Write the new content
-    await fsPromises.writeFile(filePath, content, 'utf8');
+    await fs.writeFile(filePath, content, 'utf8');
     
     res.json({ 
       success: true, 
@@ -578,7 +608,7 @@ app.delete('/api/projects/:projectName/file', authenticateToken, async (req, res
     
     // Check if file exists
     try {
-      await fsPromises.access(filePath);
+      await fs.access(filePath);
     } catch (error) {
       return res.status(404).json({ error: 'File not found' });
     }
@@ -586,14 +616,14 @@ app.delete('/api/projects/:projectName/file', authenticateToken, async (req, res
     // Create backup before deletion
     try {
       const backupPath = filePath + '.deleted.' + Date.now();
-      await fsPromises.copyFile(filePath, backupPath);
+      await fs.copyFile(filePath, backupPath);
       console.log('📋 Created backup before deletion:', backupPath);
     } catch (backupError) {
       console.warn('Could not create backup:', backupError.message);
     }
     
     // Delete the file
-    await fsPromises.unlink(filePath);
+    await fs.unlink(filePath);
     
     res.json({ 
       success: true, 
@@ -612,10 +642,90 @@ app.delete('/api/projects/:projectName/file', authenticateToken, async (req, res
   }
 });
 
+// Open terminal in project directory
+app.post('/api/projects/:projectName/open-terminal', authenticateToken, async (req, res) => {
+  try {
+    const projectName = req.params.projectName;
+    console.log('🖥️  Open terminal request:', projectName);
+    
+    // Get the actual project path
+    let projectPath;
+    try {
+      projectPath = await extractProjectDirectory(projectName);
+    } catch (error) {
+      console.error('Error extracting project directory:', error);
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    
+    // Ensure the path exists
+    try {
+      await fs.access(projectPath);
+    } catch (error) {
+      return res.status(404).json({ error: `Project path not found: ${projectPath}` });
+    }
+    
+    // Open terminal based on platform
+    let command;
+    if (process.platform === 'darwin') {
+      // macOS: Open Terminal app
+      command = `open -a Terminal "${projectPath}"`;
+    } else if (process.platform === 'win32') {
+      // Windows: Open Command Prompt
+      command = `start cmd /K "cd /d ${projectPath}"`;
+    } else {
+      // Linux: Try common terminal emulators
+      const terminals = ['gnome-terminal', 'konsole', 'xterm', 'x-terminal-emulator'];
+      let terminalFound = false;
+      
+      for (const terminal of terminals) {
+        try {
+          await execAsync(`which ${terminal}`);
+          command = `${terminal} --working-directory="${projectPath}"`;
+          terminalFound = true;
+          break;
+        } catch {
+          // Try next terminal
+        }
+      }
+      
+      if (!terminalFound) {
+        return res.status(500).json({ 
+          error: 'No supported terminal emulator found',
+          platform: process.platform 
+        });
+      }
+    }
+    
+    console.log('🚀 Executing terminal command:', command);
+    
+    // Execute the command
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error('❌ Error opening terminal:', error);
+        return res.status(500).json({ 
+          error: 'Failed to open terminal',
+          details: error.message 
+        });
+      }
+      
+      res.json({ 
+        success: true,
+        message: 'Terminal opened successfully',
+        projectPath,
+        platform: process.platform
+      });
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in open-terminal:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
   try {
     
-    // Using fsPromises from import
+    // Using fs from import
     
     // Use extractProjectDirectory to get the actual project path
     let actualPath;
@@ -629,7 +739,7 @@ app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) 
     
     // Check if path exists
     try {
-      await fsPromises.access(actualPath);
+      await fs.access(actualPath);
     } catch (e) {
       return res.status(404).json({ error: `Project path not found: ${actualPath}` });
     }
@@ -689,6 +799,15 @@ function handleChatConnection(ws) {
           sessionId: data.sessionId,
           success
         }));
+      } else if (data.type === 'server:start') {
+        console.log('🚀 Start server request:', data.projectPath, data.script);
+        await handleServerStart(data.projectPath, data.script, ws);
+      } else if (data.type === 'server:stop') {
+        console.log('🛑 Stop server request:', data.projectPath);
+        await handleServerStop(data.projectPath, ws);
+      } else if (data.type === 'server:status') {
+        console.log('📊 Server status request:', data.projectPath);
+        await handleServerStatus(data.projectPath, ws);
       }
     } catch (error) {
       console.error('❌ Chat WebSocket error:', error.message);
@@ -812,6 +931,272 @@ async function handleHelpChat(message, ws, userApiKey = null) {
   }
 }
 
+// Server management functions
+async function handleServerStart(projectPath, script, ws) {
+  try {
+    // Check if server is already running for this project
+    if (runningServers.has(projectPath)) {
+      const serverInfo = runningServers.get(projectPath);
+      ws.send(JSON.stringify({
+        type: 'server:already-running',
+        projectPath,
+        url: serverInfo.url,
+        script: serverInfo.script,
+        startTime: serverInfo.startTime
+      }));
+      return;
+    }
+
+    // Send starting status
+    ws.send(JSON.stringify({
+      type: 'server:starting',
+      projectPath,
+      script
+    }));
+
+    // Create a log file for the server output
+    const logFileName = `server-${path.basename(projectPath)}-${Date.now()}.log`;
+    const logFilePath = path.join(os.tmpdir(), logFileName);
+    
+    // Start the server process completely detached (like running in terminal)
+    // Using nohup to ensure it continues running independently
+    const startCommand = process.platform === 'win32' 
+      ? `start /b cmd /c "cd /d "${projectPath}" && ${script} > "${logFilePath}" 2>&1"`
+      : `cd "${projectPath}" && nohup ${script} > "${logFilePath}" 2>&1 & echo $!`;
+    
+    let serverPid;
+    try {
+      if (process.platform === 'win32') {
+        // For Windows, we need a different approach
+        exec(startCommand, { shell: true });
+        // Give it a moment to start
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } else {
+        // For Unix-like systems, get the PID
+        const result = execSync(startCommand, { encoding: 'utf8' });
+        serverPid = parseInt(result.trim());
+        console.log('🚀 Started server with PID:', serverPid);
+      }
+    } catch (error) {
+      console.error('❌ Failed to start server:', error);
+      ws.send(JSON.stringify({
+        type: 'server:error',
+        projectPath,
+        error: `Failed to start server: ${error.message}`
+      }));
+      return;
+    }
+
+    let serverUrl = null;
+    let isUrlDetected = false;
+    let lastLogSize = 0;
+
+    // Monitor the log file for output
+    const checkLogFile = async () => {
+      try {
+        const stats = await fs.stat(logFilePath);
+        if (stats.size > lastLogSize) {
+          const buffer = Buffer.alloc(stats.size - lastLogSize);
+          const fd = await fs.open(logFilePath, 'r');
+          await fd.read(buffer, 0, buffer.length, lastLogSize);
+          await fd.close();
+          
+          const newOutput = buffer.toString();
+          lastLogSize = stats.size;
+          
+          console.log('📤 Server output:', newOutput);
+
+          // Send logs to client
+          ws.send(JSON.stringify({
+            type: 'server:log',
+            projectPath,
+            log: newOutput
+          }));
+
+          // Detect server URL patterns
+          if (!isUrlDetected) {
+            const urlPatterns = [
+              /(?:Local:|Running on|Server running|Available on|Listening on|Started.*http).*?(https?:\/\/[^\s\n]+)/i,
+              /(?:localhost:|127\.0\.0\.1:)(\d+)/i,
+              /(?:Port|port)[\s:]*(\d+)/i
+            ];
+
+            for (const pattern of urlPatterns) {
+              const match = newOutput.match(pattern);
+              if (match) {
+                if (match[1] && match[1].startsWith('http')) {
+                  serverUrl = match[1];
+                } else if (match[1] && /^\d+$/.test(match[1])) {
+                  serverUrl = `http://localhost:${match[1]}`;
+                }
+                
+                if (serverUrl) {
+                  isUrlDetected = true;
+                  console.log('🌐 Detected server URL:', serverUrl);
+                  
+                  // Store server info
+                  runningServers.set(projectPath, {
+                    pid: serverPid,
+                    logFile: logFilePath,
+                    url: serverUrl,
+                    script,
+                    startTime: new Date().toISOString()
+                  });
+
+                  // Notify client that server is running
+                  ws.send(JSON.stringify({
+                    type: 'server:running',
+                    projectPath,
+                    url: serverUrl,
+                    script,
+                    startTime: new Date().toISOString()
+                  }));
+                  
+                  // Stop monitoring once URL is detected
+                  clearInterval(logMonitor);
+                  break;
+                }
+              }
+            }
+          }
+        }
+      } catch (error) {
+        // Log file might not exist yet, ignore
+      }
+    };
+    
+    // Start monitoring the log file
+    const logMonitor = setInterval(checkLogFile, 500);
+    
+    // Stop monitoring after 30 seconds if no URL detected
+    setTimeout(() => {
+      clearInterval(logMonitor);
+      if (!isUrlDetected) {
+        // Even if URL not detected, store the server info
+        runningServers.set(projectPath, {
+          pid: serverPid,
+          logFile: logFilePath,
+          url: null,
+          script,
+          startTime: new Date().toISOString()
+        });
+        
+        ws.send(JSON.stringify({
+          type: 'server:running',
+          projectPath,
+          url: null,
+          script,
+          startTime: new Date().toISOString(),
+          message: 'Server started but URL not detected. Check logs for details.'
+        }));
+      }
+    }, 30000);
+
+  } catch (error) {
+    console.error('❌ Error starting server:', error);
+    ws.send(JSON.stringify({
+      type: 'server:error',
+      projectPath,
+      error: error.message
+    }));
+  }
+}
+
+async function handleServerStop(projectPath, ws) {
+  try {
+    const serverInfo = runningServers.get(projectPath);
+    
+    if (!serverInfo) {
+      ws.send(JSON.stringify({
+        type: 'server:not-running',
+        projectPath
+      }));
+      return;
+    }
+
+    // Send stopping status
+    ws.send(JSON.stringify({
+      type: 'server:stopping',
+      projectPath
+    }));
+
+    // Kill the process
+    if (serverInfo.pid) {
+      try {
+        if (process.platform === 'win32') {
+          // Windows: use taskkill
+          execSync(`taskkill /F /PID ${serverInfo.pid}`, { stdio: 'ignore' });
+        } else {
+          // Unix: kill process group
+          process.kill(-serverInfo.pid, 'SIGTERM');
+          
+          // Force kill after 5 seconds if not terminated
+          setTimeout(() => {
+            if (runningServers.has(projectPath)) {
+              console.log('🔪 Force killing server process');
+              try {
+                process.kill(-serverInfo.pid, 'SIGKILL');
+              } catch (error) {
+                // Process might already be dead
+                console.log('⚠️  Process might already be terminated:', error.message);
+              }
+            }
+          }, 5000);
+        }
+      } catch (error) {
+        console.log('⚠️  Error killing process:', error.message);
+      }
+    }
+    
+    // Clean up log file
+    if (serverInfo.logFile) {
+      try {
+        await fs.unlink(serverInfo.logFile);
+      } catch (error) {
+        // Log file might not exist, ignore
+      }
+    }
+
+  } catch (error) {
+    console.error('❌ Error stopping server:', error);
+    ws.send(JSON.stringify({
+      type: 'server:error',
+      projectPath,
+      error: error.message
+    }));
+  }
+}
+
+async function handleServerStatus(projectPath, ws) {
+  try {
+    const serverInfo = runningServers.get(projectPath);
+    
+    if (serverInfo) {
+      ws.send(JSON.stringify({
+        type: 'server:status',
+        projectPath,
+        status: 'running',
+        url: serverInfo.url,
+        script: serverInfo.script,
+        startTime: serverInfo.startTime
+      }));
+    } else {
+      ws.send(JSON.stringify({
+        type: 'server:status',
+        projectPath,
+        status: 'stopped'
+      }));
+    }
+  } catch (error) {
+    console.error('❌ Error getting server status:', error);
+    ws.send(JSON.stringify({
+      type: 'server:error',
+      projectPath,
+      error: error.message
+    }));
+  }
+}
+
 // Handle shell WebSocket connections
 function handleShellConnection(ws) {
   console.log('🐚 Shell client connected');
@@ -842,18 +1227,50 @@ function handleShellConnection(ws) {
         }));
         
         try {
+          // Allow custom command through environment variable
+          const customCommand = process.env.CLAUDE_CLI_COMMAND || 'claude';
+          
           // Build shell command that changes to project directory first, then runs claude
-          let claudeCommand = 'claude';
+          let claudeCommand = customCommand;
           
           if (hasSession && sessionId) {
             // Try to resume session, but with fallback to new session if it fails
-            claudeCommand = `claude --resume ${sessionId} || claude`;
+            claudeCommand = `${customCommand} --resume ${sessionId} || ${customCommand}`;
           }
           
           // Create shell command that cds to the project directory first
-          const shellCommand = `cd "${projectPath}" && ${claudeCommand}`;
+          // First check if claude is available
+          const checkAndRunCommand = `
+            cd "${projectPath}" && 
+            if command -v ${customCommand} &> /dev/null; then
+              ${claudeCommand}
+            else
+              echo -e "\\x1b[31m❌ Error: '${customCommand}' command not found\\x1b[0m"
+              echo -e "\\x1b[33m"
+              if [ "${customCommand}" = "claude" ]; then
+                echo -e "Claude CLI is not installed or not in your PATH."
+                echo -e ""
+                echo -e "To install Claude CLI, please run:"
+                echo -e "\\x1b[36m  npm install -g @anthropic-ai/claude-cli\\x1b[0m"
+                echo -e ""
+                echo -e "Or if you have Claude CLI installed in a custom location,"
+                echo -e "please make sure it's in your PATH."
+              else
+                echo -e "The custom command '${customCommand}' is not installed or not in your PATH."
+                echo -e ""
+                echo -e "Please make sure '${customCommand}' is installed and available in your PATH."
+                echo -e ""
+                echo -e "You can set a different command by setting the CLAUDE_CLI_COMMAND"
+                echo -e "environment variable in your .env file."
+              fi
+              echo -e "\\x1b[0m"
+              exit 1
+            fi
+          `;
           
-          console.log('🔧 Executing shell command:', shellCommand);
+          const shellCommand = checkAndRunCommand.trim();
+          
+          console.log('🔧 Executing shell command with claude check');
           
           // Start shell using PTY for proper terminal emulation
           shellProcess = pty.spawn('bash', ['-c', shellCommand], {
@@ -923,9 +1340,19 @@ function handleShellConnection(ws) {
           shellProcess.onExit((exitCode) => {
             console.log('🔚 Shell process exited with code:', exitCode.exitCode, 'signal:', exitCode.signal);
             if (ws.readyState === ws.OPEN) {
+              let exitMessage = '';
+              if (exitCode.exitCode === 1) {
+                exitMessage = `\r\n\x1b[33m⚠️ Process exited with error (code ${exitCode.exitCode})\x1b[0m\r\n`;
+                exitMessage += `\x1b[33mThis usually means Claude CLI is not installed or configured properly.\x1b[0m\r\n`;
+              } else if (exitCode.exitCode === 0) {
+                exitMessage = `\r\n\x1b[32m✓ Claude session ended successfully\x1b[0m\r\n`;
+              } else {
+                exitMessage = `\r\n\x1b[33mProcess exited with code ${exitCode.exitCode}${exitCode.signal ? ` (${exitCode.signal})` : ''}\x1b[0m\r\n`;
+              }
+              
               ws.send(JSON.stringify({
                 type: 'output',
-                data: `\r\n\x1b[33mProcess exited with code ${exitCode.exitCode}${exitCode.signal ? ` (${exitCode.signal})` : ''}\x1b[0m\r\n`
+                data: exitMessage
               }));
             }
             shellProcess = null;
@@ -1228,11 +1655,11 @@ function permToRwx(perm) {
 }
 
 async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden = true) {
-  // Using fsPromises from import
+  // Using fs from import
   const items = [];
   
   try {
-    const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
     
     for (const entry of entries) {
       // Debug: log all entries including hidden files
@@ -1252,7 +1679,7 @@ async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden =
       
       // Get file stats for additional metadata
       try {
-        const stats = await fsPromises.stat(itemPath);
+        const stats = await fs.stat(itemPath);
         item.size = stats.size;
         item.modified = stats.mtime.toISOString();
         
@@ -1275,7 +1702,7 @@ async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden =
         // Recursively get subdirectories but limit depth
         try {
           // Check if we can access the directory before trying to read it
-          await fsPromises.access(item.path, fs.constants.R_OK);
+          await fs.access(item.path, fs.constants.R_OK);
           item.children = await getFileTree(item.path, maxDepth, currentDepth + 1, showHidden);
         } catch (e) {
           // Silently skip directories we can't access (permission denied, etc.)
@@ -1318,8 +1745,8 @@ async function startServer() {
     await initializeDatabase();
     console.log('✅ Database initialization skipped (testing)');
     
-    server.listen(PORT, '0.0.0.0', async () => {
-      console.log(`Claude Code UI server running on http://0.0.0.0:${PORT}`);
+    server.listen(PORT, async () => {
+      console.log(`Claude Code UI server running on http://localhost:${PORT}`);
       
       // Start watching the projects folder for changes
       await setupProjectsWatcher(); // Re-enabled with better-sqlite3
