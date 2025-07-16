@@ -25,6 +25,9 @@ import MainContent from './components/MainContent';
 import MobileNav from './components/MobileNav';
 import ToolsSettings from './components/ToolsSettings';
 import QuickSettingsPanel from './components/QuickSettingsPanel';
+import FloatingHelpButton from './components/FloatingHelpButton';
+import HelpChat from './components/HelpChat';
+import UsageAnalytics from './components/UsageAnalytics';
 
 import { useWebSocket } from './utils/websocket';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -56,6 +59,7 @@ function AppContent() {
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showToolsSettings, setShowToolsSettings] = useState(false);
   const [showQuickSettings, setShowQuickSettings] = useState(false);
+  const [showHelpChat, setShowHelpChat] = useState(false);
   const [autoExpandTools, setAutoExpandTools] = useState(() => {
     const saved = localStorage.getItem('autoExpandTools');
     return saved !== null ? JSON.parse(saved) : false;
@@ -638,6 +642,16 @@ function AppContent() {
         onClose={() => setShowToolsSettings(false)}
       />
 
+      {/* Help Chat */}
+      <FloatingHelpButton
+        onClick={() => setShowHelpChat(!showHelpChat)}
+        isOpen={showHelpChat}
+      />
+      <HelpChat
+        isOpen={showHelpChat}
+        onClose={() => setShowHelpChat(false)}
+      />
+
       {/* Version Upgrade Modal */}
       <VersionUpgradeModal />
     </div>
@@ -654,6 +668,7 @@ function App() {
             <Routes>
               <Route path="/" element={<AppContent />} />
               <Route path="/session/:sessionId" element={<AppContent />} />
+              <Route path="/usage" element={<UsageAnalytics />} />
             </Routes>
           </Router>
         </ProtectedRoute>

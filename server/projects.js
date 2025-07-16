@@ -191,12 +191,24 @@ async function getProjects() {
         const autoDisplayName = await generateDisplayName(entry.name, actualProjectDir);
         const fullPath = actualProjectDir;
         
+        // Get folder creation time if createdAt is not in config
+        let createdAt = config[entry.name]?.createdAt || null;
+        if (!createdAt) {
+          try {
+            const stats = await fs.stat(projectPath);
+            createdAt = stats.birthtime.toISOString();
+          } catch (error) {
+            console.warn(`Could not get folder creation time for ${entry.name}:`, error.message);
+          }
+        }
+        
         const project = {
           name: entry.name,
           path: actualProjectDir,
           displayName: customName || autoDisplayName,
           fullPath: fullPath,
           isCustomName: !!customName,
+          createdAt: createdAt,
           sessions: []
         };
         
@@ -241,6 +253,7 @@ async function getProjects() {
           fullPath: actualProjectDir,
           isCustomName: !!projectConfig.displayName,
           isManuallyAdded: true,
+          createdAt: projectConfig.createdAt || new Date().toISOString(), // Use current time if not set
           sessions: []
         };
       
@@ -377,21 +390,27 @@ async function parseJsonlSessions(filePath) {
           }
         } catch (parseError) {
           errorCount++;
-          console.warn(`[JSONL Parser] Error parsing line ${lineCount}: ${parseError.message}`);
           
-          // Log problematic line details for debugging
-          if (errorCount <= 5) { // Limit detailed logging to first 5 errors
-            const truncatedLine = line.length > 100 ? line.substring(0, 100) + '...' : line;
+          // Only log errors in debug mode to reduce noise
+          if (process.env.NODE_ENV === 'development' && errorCount <= 5) {
+            console.warn(`[JSONL Parser] Error parsing line ${lineCount}: ${parseError.message}`);
+            
+            // Clean the line of null bytes and other control characters
+            const cleanLine = line.replace(/\u0000/g, '').replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+            const truncatedLine = cleanLine.length > 100 ? cleanLine.substring(0, 100) + '...' : cleanLine;
             console.warn(`[JSONL Parser] Problematic line preview: ${truncatedLine}`);
             
             // Check for common JSON issues
             if (line.includes('\u0000')) {
               console.warn('[JSONL Parser] Line contains null bytes');
             }
-            if (!line.endsWith('}') && !line.endsWith(']')) {
+            if (!cleanLine.endsWith('}') && !cleanLine.endsWith(']')) {
               console.warn('[JSONL Parser] Line appears to be truncated');
             }
           }
+          
+          // Skip this line and continue processing
+          continue;
         }
       }
     }
@@ -569,7 +588,7 @@ async function deleteProject(projectName) {
 }
 
 // Add a project manually to the config (without creating folders)
-async function addProjectManually(projectPath, displayName = null) {
+async function addProjectManually(projectPath, displayName = null, fileName = null, folderName = null) {
   // Expand ~ to home directory first
   const expandedPath = projectPath.replace(/^~/, process.env.HOME || require('os').homedir());
   const absolutePath = path.resolve(expandedPath);
@@ -601,14 +620,60 @@ async function addProjectManually(projectPath, displayName = null) {
     throw new Error(`Project already configured for path: ${absolutePath}`);
   }
   
+  // Create initial file if fileName is provided
+  if (fileName && fileName.trim()) {
+    const filePath = path.join(absolutePath, fileName.trim());
+    try {
+      // Check if file already exists
+      await fs.access(filePath);
+      console.log(`File already exists: ${filePath}`);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        // Create the file with basic content based on extension
+        const extension = path.extname(fileName.trim()).toLowerCase();
+        let content = '';
+        
+        switch (extension) {
+          case '.py':
+            content = '# Python script\n\nif __name__ == "__main__":\n    print("Hello, World!")\n';
+            break;
+          case '.js':
+            content = '// JavaScript file\n\nconsole.log("Hello, World!");\n';
+            break;
+          case '.html':
+            content = '<!DOCTYPE html>\n<html>\n<head>\n    <title>New Project</title>\n</head>\n<body>\n    <h1>Hello, World!</h1>\n</body>\n</html>\n';
+            break;
+          case '.md':
+            content = '# New Project\n\nThis is a new project created with Claude Code UI.\n';
+            break;
+          case '.txt':
+            content = 'Hello, World!\n';
+            break;
+          default:
+            content = '// New file\n';
+        }
+        
+        await fs.writeFile(filePath, content, 'utf8');
+        console.log(`Created initial file: ${filePath}`);
+      } else {
+        throw error;
+      }
+    }
+  }
+  
   // Add to config as manually added project
   config[projectName] = {
     manuallyAdded: true,
-    originalPath: absolutePath
+    originalPath: absolutePath,
+    createdAt: new Date().toISOString()
   };
   
   if (displayName) {
     config[projectName].displayName = displayName;
+  }
+  
+  if (folderName) {
+    config[projectName].folderName = folderName;
   }
   
   await saveProjectConfig(config);
@@ -620,6 +685,7 @@ async function addProjectManually(projectPath, displayName = null) {
     fullPath: absolutePath,
     displayName: displayName || await generateDisplayName(projectName, absolutePath),
     isManuallyAdded: true,
+    createdAt: new Date().toISOString(),
     sessions: []
   };
 }

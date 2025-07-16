@@ -4,7 +4,7 @@ import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Input } from './ui/input';
 
-import { FolderOpen, Folder, Plus, MessageSquare, Clock, ChevronDown, ChevronRight, Edit3, Check, X, Trash2, Settings, FolderPlus, RefreshCw, Sparkles, Edit2, Star, Search, ChevronLeft, ChevronRight as ChevronRightIcon } from 'lucide-react';
+import { FolderOpen, Folder, Plus, MessageSquare, Clock, ChevronDown, ChevronRight, Edit3, Check, X, Trash2, Settings, FolderPlus, RefreshCw, Sparkles, Edit2, Star, Search, ChevronLeft, ChevronRight as ChevronRightIcon, BarChart3 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import ClaudeLogo from './ClaudeLogo';
 import { api } from '../utils/api';
@@ -60,13 +60,14 @@ function Sidebar({
   const [editingName, setEditingName] = useState('');
   const [newProjectPath, setNewProjectPath] = useState('');
   const [newFileName, setNewFileName] = useState('');
+  const [newFolderName, setNewFolderName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectMode, setProjectMode] = useState('new'); // 'existing' or 'new' - default to 'new' for easier use
   const [loadingSessions, setLoadingSessions] = useState({});
   const [additionalSessions, setAdditionalSessions] = useState({});
   const [initialSessionsLoaded, setInitialSessionsLoaded] = useState(new Set());
   const [currentTime, setCurrentTime] = useState(new Date());
-  const [projectSortOrder, setProjectSortOrder] = useState('name');
+  const [projectSortOrder, setProjectSortOrder] = useState('created');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [editingSession, setEditingSession] = useState(null);
   const [editingSessionName, setEditingSessionName] = useState('');
@@ -185,7 +186,8 @@ function Sidebar({
   const getProjectLastActivity = (project) => {
     const sessions = getAllSessionsForProject(project);
     if (sessions.length === 0) {
-      return new Date(0); // Return epoch date for projects with no sessions
+      // If no sessions, use project creation time or current time as fallback
+      return project.createdAt ? new Date(project.createdAt) : new Date();
     }
     
     const mostRecentDate = sessions.reduce((latest, session) => {
@@ -200,15 +202,46 @@ function Sidebar({
     return [...projects].sort((a, b) => {
       const aStarred = starredProjects.has(a.name);
       const bStarred = starredProjects.has(b.name);
+      const aNew = isNewProject(a);
+      const bNew = isNewProject(b);
       
       // Starred projects come first
       if (aStarred && !bStarred) return -1;
       if (!aStarred && bStarred) return 1;
       
+      // Among starred or non-starred, new projects come first
+      if (aNew && !bNew) return -1;
+      if (!aNew && bNew) return 1;
+      
       // Then sort by the selected order
       if (projectSortOrder === 'recent') {
-        // Sort by most recent activity
-        return getProjectLastActivity(b) - getProjectLastActivity(a);
+        // For recent sort, prioritize creation time over activity time for better UX
+        const aCreatedTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const bCreatedTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        const aActivityTime = getProjectLastActivity(a).getTime();
+        const bActivityTime = getProjectLastActivity(b).getTime();
+        
+        // Use the most recent between creation and activity time
+        const aTime = Math.max(aCreatedTime, aActivityTime);
+        const bTime = Math.max(bCreatedTime, bActivityTime);
+        
+        // Debug logging (can be removed in production)
+        console.log(`[Sort Debug] ${a.displayName}: created=${new Date(aCreatedTime).toLocaleString()}, activity=${new Date(aActivityTime).toLocaleString()}, final=${new Date(aTime).toLocaleString()}`);
+        console.log(`[Sort Debug] ${b.displayName}: created=${new Date(bCreatedTime).toLocaleString()}, activity=${new Date(bActivityTime).toLocaleString()}, final=${new Date(bTime).toLocaleString()}`);
+        
+        return bTime - aTime;
+      } else if (projectSortOrder === 'created') {
+        // Sort by creation time (newest first)
+        if (a.createdAt && b.createdAt) {
+          return new Date(b.createdAt) - new Date(a.createdAt);
+        }
+        // If only one has createdAt, prioritize it
+        if (a.createdAt && !b.createdAt) return -1;
+        if (!a.createdAt && b.createdAt) return 1;
+        // Otherwise sort alphabetically
+        const nameA = a.displayName?.toLowerCase() || a.name?.toLowerCase() || '';
+        const nameB = b.displayName?.toLowerCase() || b.name?.toLowerCase() || '';
+        return nameA.localeCompare(nameB);
       } else {
         // Sort alphabetically
         const nameA = a.displayName?.toLowerCase() || a.name?.toLowerCase() || '';
@@ -317,15 +350,24 @@ function Sidebar({
     return `claude-project-${timestamp}`;
   };
 
-  // Handle project creation with optional file creation
+  // Check if a project is newly created (within last 3 hours)
+  const isNewProject = (project) => {
+    if (!project.createdAt) return false;
+    const createdAt = new Date(project.createdAt);
+    const now = new Date();
+    const hoursDiff = (now - createdAt) / (1000 * 60 * 60);
+    return hoursDiff < 3;
+  };
+
+  // Handle project creation without automatic file creation
   const handleCreateProject = async () => {
     let projectPath = newProjectPath.trim();
     
-    // If in 'new' mode, use Downloads folder with auto-generated name
+    // If in 'new' mode, use Downloads folder with user-specified or auto-generated name
     if (projectMode === 'new') {
-      const projectName = generateProjectName();
-      projectPath = `~/Downloads/${projectName}`;
-      console.log('自動生成プロジェクトパス:', projectPath);
+      const folderName = newFolderName.trim() || generateProjectName();
+      projectPath = `~/Downloads/${folderName}`;
+      console.log('プロジェクトパス:', projectPath);
     }
     
     if (!projectPath) return;
@@ -358,7 +400,9 @@ function Sidebar({
       }
       
       // Call the API to create/initialize a new project
-      const response = await api.createProject(projectPath);
+      const fileName = newFileName.trim() || null;
+      const folderName = newFolderName.trim() || null;
+      const response = await api.createProject(projectPath, fileName, folderName);
       
       if (!response.ok) {
         const errorData = await response.json();
@@ -368,25 +412,23 @@ function Sidebar({
       const result = await response.json();
       console.log('プロジェクト作成成功:', result);
       
-      // If filename is provided, create the file(s)
-      if (newFileName.trim()) {
-        const projectInfo = result.project || { name: projectPath.split('/').pop() };
-        const files = newFileName.split(',').map(f => f.trim()).filter(f => f);
-        
-        for (const filename of files) {
-          await createInitialFile(projectInfo, filename);
-        }
-      }
-      
       // Close modal and reset form
       setShowNewProject(false);
       setNewProjectPath('');
       setNewFileName('');
+      setNewFolderName('');
       setProjectMode('new');
       
       // Refresh projects list
       if (onRefresh) {
         await onRefresh();
+      }
+      
+      // Refresh file list if we're in the current project
+      if (window.location.pathname.includes('project') && onFileCreated) {
+        setTimeout(() => {
+          onFileCreated?.refreshFiles?.();
+        }, 1000);
       }
       
       // Show success message
@@ -400,54 +442,6 @@ function Sidebar({
     }
   };
 
-  // Create initial file in the project
-  const createInitialFile = async (project, filename) => {
-    try {
-      filename = filename.trim();
-      const extension = filename.split('.').pop().toLowerCase();
-      
-      // Generate initial content based on file extension
-      let initialContent = '';
-      switch (extension) {
-        case 'js':
-          initialContent = `// ${filename}\nconsole.log('Hello, World!');\n`;
-          break;
-        case 'py':
-          initialContent = `# ${filename}\nprint("Hello, World!")\n`;
-          break;
-        case 'html':
-          initialContent = `<!DOCTYPE html>\n<html>\n<head>\n    <title>${filename}</title>\n</head>\n<body>\n    <h1>Hello, World!</h1>\n</body>\n</html>\n`;
-          break;
-        case 'css':
-          initialContent = `/* ${filename} */\nbody {\n    margin: 0;\n    padding: 0;\n    font-family: Arial, sans-serif;\n}\n`;
-          break;
-        case 'md':
-          initialContent = `# ${filename.replace('.md', '')}\n\nプロジェクトの説明をここに記載してください。\n`;
-          break;
-        case 'json':
-          initialContent = `{\n  "name": "${filename.replace('.json', '')}",\n  "version": "1.0.0"\n}\n`;
-          break;
-        case 'txt':
-          initialContent = `${filename}\n\nテキストファイルの内容をここに記載してください。\n`;
-          break;
-        default:
-          initialContent = `// ${filename}\n// ファイルの内容をここに記載してください\n`;
-      }
-      
-      const response = await api.saveFile(project.name, filename, initialContent);
-      
-      if (!response.ok) {
-        throw new Error('ファイルの作成に失敗しました');
-      }
-      
-      console.log(`初期ファイル ${filename} が作成されました`);
-      
-    } catch (error) {
-      console.error('ファイル作成エラー:', error);
-      // Don't throw error here, as project creation was successful
-      console.warn('プロジェクトは作成されましたが、ファイルの作成に失敗しました');
-    }
-  };
 
   // Rest of the component logic would go here...
   // For now, let's create a simplified version
@@ -593,9 +587,9 @@ function Sidebar({
         </div>
       )}
       
-      {/* Search Filter - Minimalist Design */}
+      {/* Search Filter and Sort Controls - Minimalist Design */}
       {projects.length > 0 && !isLoading && !isCollapsed && (
-        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 space-y-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400 dark:text-gray-500" />
             <Input
@@ -613,6 +607,43 @@ function Sidebar({
                 <X className="w-3 h-3 text-gray-400 dark:text-gray-500" />
               </button>
             )}
+          </div>
+          
+          {/* Sort Controls */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500 dark:text-gray-400">並び順:</span>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setProjectSortOrder('recent')}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  projectSortOrder === 'recent'
+                    ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                }`}
+              >
+                最新順
+              </button>
+              <button
+                onClick={() => setProjectSortOrder('created')}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  projectSortOrder === 'created'
+                    ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                }`}
+              >
+                作成順
+              </button>
+              <button
+                onClick={() => setProjectSortOrder('name')}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  projectSortOrder === 'name'
+                    ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                }`}
+              >
+                名前順
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -653,7 +684,19 @@ function Sidebar({
               </div>
             ) : (
               <div className="space-y-1">
-                {sortProjects(filteredProjects).map((project) => {
+                {(() => {
+                  const sorted = sortProjects(filteredProjects);
+                  console.log('[Sidebar Debug] Filtered projects:', filteredProjects);
+                  console.log('[Sidebar Debug] Projects with details:', filteredProjects.map(p => ({
+                    name: p.displayName || p.name,
+                    createdAt: p.createdAt,
+                    hasCreatedAt: !!p.createdAt,
+                    sessions: p.sessions?.length || 0
+                  })));
+                  console.log('[Sidebar Debug] Sorted projects:', sorted);
+                  console.log('[Sidebar Debug] Sort order:', projectSortOrder);
+                  return sorted;
+                })().map((project) => {
                   const isProjectSelected = selectedProject?.name === project.name;
                   const isProjectExpanded = expandedProjects.has(project.name);
                   const projectSessions = getAllSessionsForProject(project);
@@ -690,9 +733,16 @@ function Sidebar({
                             ) : (
                               /* Expanded view - show full info */
                               <>
-                                <h3 className="text-sm font-medium text-gray-900 dark:text-white truncate">
-                                  {project.displayName || project.name}
-                                </h3>
+                                <div className="flex items-center gap-2">
+                                  <h3 className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                                    {project.displayName || project.name}
+                                  </h3>
+                                  {isNewProject(project) && (
+                                    <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 text-xs px-2 py-0.5 rounded-full">
+                                      最新
+                                    </Badge>
+                                  )}
+                                </div>
                                 <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
                                   {project.fullPath}
                                 </p>
@@ -802,6 +852,8 @@ function Sidebar({
                     onClick={() => {
                       setProjectMode('existing');
                       setNewProjectPath('');
+                      setNewFileName('');
+                      setNewFolderName('');
                     }}
                     className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
                       projectMode === 'existing'
@@ -816,6 +868,8 @@ function Sidebar({
                     onClick={() => {
                       setProjectMode('new');
                       setNewProjectPath('');
+                      setNewFileName('');
+                      setNewFolderName('');
                     }}
                     className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
                       projectMode === 'new'
@@ -895,7 +949,7 @@ function Sidebar({
                           ダウンロードフォルダに自動生成
                         </p>
                         <p className="text-xs text-green-600 dark:text-green-400 mt-1">
-                          ~/Downloads/{generateProjectName()}
+                          ~/Downloads/{newFolderName.trim() || generateProjectName()}
                         </p>
                       </div>
                     </div>
@@ -903,53 +957,43 @@ function Sidebar({
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
                     タイムスタンプ付きのプロジェクトフォルダが自動的に作成されます
                   </p>
-                </div>
-              )}
-              
-              {/* Initial file creation */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  初期ファイル作成 (オプション)
-                </label>
-                <Input
-                  type="text"
-                  value={newFileName}
-                  onChange={(e) => setNewFileName(e.target.value)}
-                  placeholder="例: main.js, index.html, README.md (複数可、カンマ区切り)"
-                  className="w-full"
-                />
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  ファイル名を入力すると、プロジェクト作成時に自動的に初期ファイルが作成されます。複数ファイルはカンマ区切りで指定可能です。
-                </p>
-              </div>
-              
-              {/* File type suggestions */}
-              {newFileName && (
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                    よく使われるファイル:
-                  </label>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      { label: 'JavaScript', file: 'main.js' },
-                      { label: 'Python', file: 'main.py' },
-                      { label: 'HTML', file: 'index.html' },
-                      { label: 'CSS', file: 'style.css' },
-                      { label: 'README', file: 'README.md' },
-                      { label: 'package.json', file: 'package.json' }
-                    ].map((suggestion) => (
-                      <button
-                        key={suggestion.file}
-                        type="button"
-                        onClick={() => setNewFileName(suggestion.file)}
-                        className="px-2 py-1 text-xs text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 hover:bg-green-100 dark:hover:bg-green-900/30 rounded border border-green-200 dark:border-green-800 transition-colors"
-                      >
-                        {suggestion.label}
-                      </button>
-                    ))}
+                  
+                  {/* Folder Name Input for New Mode */}
+                  <div className="mt-4">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      フォルダー名
+                    </label>
+                    <Input
+                      type="text"
+                      value={newFolderName}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      placeholder="例: my-project, website, python-app"
+                      className="w-full"
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      空の場合は自動生成されたフォルダー名を使用します
+                    </p>
+                  </div>
+                  
+                  {/* File Name Input for New Mode */}
+                  <div className="mt-4">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      初期ファイル名 (オプション)
+                    </label>
+                    <Input
+                      type="text"
+                      value={newFileName}
+                      onChange={(e) => setNewFileName(e.target.value)}
+                      placeholder="例: main.py, index.html, README.md"
+                      className="w-full"
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      空の場合は初期ファイルなしでプロジェクトを作成します
+                    </p>
                   </div>
                 </div>
               )}
+              
               
               {/* Quick path suggestions - only for existing mode */}
               {projectMode === 'existing' && (
@@ -991,7 +1035,7 @@ function Sidebar({
                 disabled={(projectMode === 'existing' && !newProjectPath.trim()) || creatingProject}
                 className="flex-1 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
               >
-                {creatingProject ? '作成中...' : newFileName ? 'プロジェクト + ファイル作成' : 'プロジェクト作成'}
+                {creatingProject ? '作成中...' : 'プロジェクト作成'}
               </button>
             </div>
           </div>
@@ -1001,7 +1045,16 @@ function Sidebar({
       {/* Settings Section */}
       <div className="md:p-2 md:border-t md:border-border flex-shrink-0">
         {/* Mobile Settings */}
-        <div className="md:hidden p-4 pb-20 border-t border-border/50">
+        <div className="md:hidden p-4 pb-20 border-t border-border/50 space-y-3">
+          <button
+            className="w-full h-14 bg-muted/50 hover:bg-muted/70 rounded-2xl flex items-center justify-start gap-4 px-4 active:scale-[0.98] transition-all duration-150"
+            onClick={() => window.open('/usage', '_blank')}
+          >
+            <div className="w-10 h-10 rounded-2xl bg-background/80 flex items-center justify-center">
+              <BarChart3 className="w-5 h-5 text-muted-foreground" />
+            </div>
+            <span className="text-lg font-medium text-foreground">使用量分析</span>
+          </button>
           <button
             className="w-full h-14 bg-muted/50 hover:bg-muted/70 rounded-2xl flex items-center justify-start gap-4 px-4 active:scale-[0.98] transition-all duration-150"
             onClick={onShowSettings}
@@ -1014,14 +1067,24 @@ function Sidebar({
         </div>
         
         {/* Desktop Settings */}
-        <Button
-          variant="ghost"
-          className={`hidden md:flex w-full ${isCollapsed ? 'justify-center' : 'justify-start'} gap-2 p-2 h-auto font-normal text-muted-foreground hover:text-foreground hover:bg-accent transition-colors duration-200`}
-          onClick={onShowSettings}
-        >
-          <Settings className="w-3 h-3" />
-          {!isCollapsed && <span className="text-xs">ツール設定</span>}
-        </Button>
+        <div className="hidden md:flex flex-col gap-1">
+          <Button
+            variant="ghost"
+            className={`w-full ${isCollapsed ? 'justify-center' : 'justify-start'} gap-2 p-2 h-auto font-normal text-muted-foreground hover:text-foreground hover:bg-accent transition-colors duration-200`}
+            onClick={() => window.open('/usage', '_blank')}
+          >
+            <BarChart3 className="w-3 h-3" />
+            {!isCollapsed && <span className="text-xs">使用量分析</span>}
+          </Button>
+          <Button
+            variant="ghost"
+            className={`w-full ${isCollapsed ? 'justify-center' : 'justify-start'} gap-2 p-2 h-auto font-normal text-muted-foreground hover:text-foreground hover:bg-accent transition-colors duration-200`}
+            onClick={onShowSettings}
+          >
+            <Settings className="w-3 h-3" />
+            {!isCollapsed && <span className="text-xs">ツール設定</span>}
+          </Button>
+        </div>
       </div>
     </div>
   );

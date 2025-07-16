@@ -41,8 +41,13 @@ import { spawnClaude, abortClaudeSession } from './claude-cli.js';
 import gitRoutes from './routes/git.js';
 import authRoutes from './routes/auth.js';
 import mcpRoutes from './routes/mcp.js';
+import helpChatRoutes from './helpChat.js';
 import { initializeDatabase } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 // File system watcher for projects folder
 let projectsWatcher = null;
@@ -175,6 +180,136 @@ app.use('/api/git', authenticateToken, gitRoutes);
 // MCP API Routes (protected)
 app.use('/api/mcp', authenticateToken, mcpRoutes);
 
+// API route for ccusage
+app.get('/api/usage', authenticateToken, async (req, res) => {
+  try {
+    console.log('📊 Fetching Claude Code usage data...');
+    
+    const { stdout, stderr } = await execAsync('npx ccusage@latest --json 2>/dev/null', {
+      timeout: 30000,
+      env: { ...process.env, FORCE_COLOR: '0' },
+      encoding: 'utf8'
+    });
+    
+    if (stderr) {
+      console.warn('ccusage stderr:', stderr);
+    }
+    
+    // Clean up the output more aggressively
+    let cleanOutput = stdout
+      .replace(/[\x00-\x1F\x7F-\x9F]/g, '') // Remove control characters
+      .replace(/^\s+|\s+$/g, '') // Trim whitespace
+      .replace(/\r\n/g, '\n') // Normalize line endings
+      .replace(/\n+/g, '\n'); // Remove extra newlines
+    
+    console.log('🔍 Raw output length:', stdout.length);
+    console.log('🔍 Clean output length:', cleanOutput.length);
+    console.log('🔍 First 300 chars of clean output:', cleanOutput.slice(0, 300));
+    
+    // Try to extract valid JSON more carefully
+    let jsonString = '';
+    let braceCount = 0;
+    let startFound = false;
+    let startIndex = 0;
+    
+    for (let i = 0; i < cleanOutput.length; i++) {
+      const char = cleanOutput[i];
+      
+      if (char === '{') {
+        if (!startFound) {
+          startFound = true;
+          startIndex = i;
+        }
+        braceCount++;
+      } else if (char === '}') {
+        braceCount--;
+        
+        if (startFound && braceCount === 0) {
+          jsonString = cleanOutput.slice(startIndex, i + 1);
+          break;
+        }
+      }
+    }
+    
+    if (!jsonString) {
+      console.error('Could not extract valid JSON from output');
+      console.error('Raw stdout preview:', stdout.slice(0, 1000));
+      throw new Error('No valid JSON found in ccusage output');
+    }
+    
+    console.log('🔍 Extracted JSON length:', jsonString.length);
+    console.log('🔍 JSON starts with:', jsonString.slice(0, 100));
+    console.log('🔍 JSON ends with:', jsonString.slice(-100));
+    
+    // Parse JSON output from ccusage
+    let parsedData;
+    try {
+      parsedData = JSON.parse(jsonString);
+    } catch (jsonError) {
+      console.error('Failed to parse JSON from ccusage:', jsonError);
+      console.error('Problematic JSON string (first 1000 chars):', jsonString.slice(0, 1000));
+      
+      // Try to fix common JSON issues
+      try {
+        const fixedJson = jsonString
+          .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
+          .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":'); // Quote unquoted keys
+        
+        parsedData = JSON.parse(fixedJson);
+        console.log('✅ JSON fixed and parsed successfully');
+      } catch (fixError) {
+        throw new Error(`JSON parsing failed even after attempted fixes: ${jsonError.message}`);
+      }
+    }
+    
+    // Transform the JSON data to match our expected format
+    const usageData = [];
+    let total = { input: 0, output: 0, cost: 0 };
+    
+    if (parsedData && parsedData.daily && Array.isArray(parsedData.daily)) {
+      // Handle the new ccusage JSON format
+      for (const item of parsedData.daily) {
+        const models = item.modelsUsed || [];
+        const entry = {
+          date: item.date,
+          models: models,
+          input: parseInt(item.inputTokens) || 0,
+          output: parseInt(item.outputTokens) || 0,
+          cost: parseFloat(item.totalCost) || 0
+        };
+        usageData.push(entry);
+      }
+      
+      // Use totals from parsed data
+      if (parsedData.totals) {
+        total = {
+          input: parseInt(parsedData.totals.inputTokens) || 0,
+          output: parseInt(parsedData.totals.outputTokens) || 0,
+          cost: parseFloat(parsedData.totals.totalCost) || 0
+        };
+      }
+    }
+    
+    console.log('🔍 Parsed usage data count:', usageData.length);
+    console.log('🔍 Total data:', total);
+    console.log('🔍 First few entries:', usageData.slice(0, 3));
+
+    res.json({
+      success: true,
+      data: usageData,
+      total: total,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fetching usage data:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch usage data',
+      details: error.message 
+    });
+  }
+});
+
 // Static files served after API routes
 app.use(express.static(path.join(__dirname, '../dist')));
 
@@ -257,13 +392,13 @@ app.delete('/api/projects/:projectName', authenticateToken, async (req, res) => 
 // Create project endpoint
 app.post('/api/projects/create', authenticateToken, async (req, res) => {
   try {
-    const { path: projectPath } = req.body;
+    const { path: projectPath, fileName, folderName } = req.body;
     
     if (!projectPath || !projectPath.trim()) {
       return res.status(400).json({ error: 'Project path is required' });
     }
     
-    const project = await addProjectManually(projectPath.trim());
+    const project = await addProjectManually(projectPath.trim(), null, fileName, folderName);
     res.json({ success: true, project });
   } catch (error) {
     console.error('Error creating project:', error);
@@ -389,13 +524,23 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
       return res.status(400).json({ error: 'Content is required' });
     }
     
-    // Create backup of original file
+    // Ensure directory exists
+    const dir = path.dirname(filePath);
     try {
+      await fsPromises.mkdir(dir, { recursive: true });
+    } catch (mkdirError) {
+      console.warn('Could not create directory:', mkdirError.message);
+    }
+    
+    // Create backup of original file if it exists
+    try {
+      await fsPromises.access(filePath);
       const backupPath = filePath + '.backup.' + Date.now();
       await fsPromises.copyFile(filePath, backupPath);
       console.log('📋 Created backup:', backupPath);
     } catch (backupError) {
-      console.warn('Could not create backup:', backupError.message);
+      // File doesn't exist, no backup needed
+      console.log('📄 Creating new file:', filePath);
     }
     
     // Write the new content
@@ -410,6 +555,55 @@ app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) =
     console.error('Error saving file:', error);
     if (error.code === 'ENOENT') {
       res.status(404).json({ error: 'File or directory not found' });
+    } else if (error.code === 'EACCES') {
+      res.status(403).json({ error: 'Permission denied' });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Delete file endpoint
+app.delete('/api/projects/:projectName/file', authenticateToken, async (req, res) => {
+  try {
+    const { projectName } = req.params;
+    const { filePath } = req.body;
+    
+    console.log('🗑️ File delete request:', projectName, filePath);
+    
+    // Security check - ensure the path is safe and absolute
+    if (!filePath || !path.isAbsolute(filePath)) {
+      return res.status(400).json({ error: 'Invalid file path' });
+    }
+    
+    // Check if file exists
+    try {
+      await fsPromises.access(filePath);
+    } catch (error) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    // Create backup before deletion
+    try {
+      const backupPath = filePath + '.deleted.' + Date.now();
+      await fsPromises.copyFile(filePath, backupPath);
+      console.log('📋 Created backup before deletion:', backupPath);
+    } catch (backupError) {
+      console.warn('Could not create backup:', backupError.message);
+    }
+    
+    // Delete the file
+    await fsPromises.unlink(filePath);
+    
+    res.json({ 
+      success: true, 
+      path: filePath,
+      message: 'File deleted successfully' 
+    });
+  } catch (error) {
+    console.error('Error deleting file:', error);
+    if (error.code === 'ENOENT') {
+      res.status(404).json({ error: 'File not found' });
     } else if (error.code === 'EACCES') {
       res.status(403).json({ error: 'Permission denied' });
     } else {
@@ -484,6 +678,9 @@ function handleChatConnection(ws) {
         console.log('📁 Project:', data.options?.projectPath || 'Unknown');
         console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
         await spawnClaude(data.command, data.options, ws);
+      } else if (data.type === 'help-chat') {
+        console.log('❓ Help chat message:', data.message);
+        await handleHelpChat(data.message, ws, data.apiKey);
       } else if (data.type === 'abort-session') {
         console.log('🛑 Abort session request:', data.sessionId);
         const success = abortClaudeSession(data.sessionId);
@@ -507,6 +704,112 @@ function handleChatConnection(ws) {
     // Remove from connected clients
     connectedClients.delete(ws);
   });
+}
+
+// Handle help chat via WebSocket
+async function handleHelpChat(message, ws, userApiKey = null) {
+  try {
+    // Use OpenAI GPT API only (user key takes priority)
+    const apiKey = userApiKey || process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      ws.send(JSON.stringify({
+        type: 'help-chat-error',
+        error: 'OpenAI APIキーが設定されていません。設定ボタンからAPIキーを入力してください。'
+      }));
+      return;
+    }
+
+    console.log('Using OpenAI GPT API for help chat', userApiKey ? '(user provided key)' : '(server key)');
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'system',
+            content: `あなたは優秀なプログラミング教師で、Claude Codeのヘルプアシスタントです。以下のガイドラインに従って回答してください：
+
+## 基本方針
+- 初心者でも理解できるよう、専門用語は必ず簡単な言葉で説明する
+- 具体例や実際の使用場面を必ず含める
+- 段階的に説明し、一度に多くの情報を詰め込まない
+- 親しみやすく、励ましの気持ちを込めて回答する
+
+## 回答構成
+1. **まず結論**：質問への直接的な答え
+2. **簡単な説明**：初心者向けの分かりやすい解説
+3. **具体例**：実際の使い方や場面
+4. **次のステップ**：関連する学習内容やお勧めの次の行動
+
+## 専門用語の説明方法
+- API → 「異なるソフトウェア同士が会話するための約束事」
+- WebSocket → 「リアルタイムでデータを送受信する仕組み」  
+- Git → 「ファイルの変更履歴を記録・管理するツール」
+- npm → 「便利な機能を簡単に追加できるパッケージ管理ツール」
+
+## Claude Codeの主な機能
+- **プロジェクト管理**：作業フォルダを整理し、チャット履歴を保存
+- **AIとの対話**：自然言語でコード作成・編集・デバッグ
+- **ファイル操作**：作成・編集・削除をAIと協力して実行
+- **Git統合**：バージョン管理を簡単に操作
+- **ターミナル**：コマンドライン操作をGUIから実行
+- **音声入力**：話しかけるだけで質問や指示が可能
+- **セッション履歴**：過去の作業内容を振り返り可能
+
+## 回答の長さ
+- 基本的な質問：2-3文で簡潔に
+- 技術的な質問：4-6文で段階的に説明
+- 複雑な概念：例を使って丁寧に解説
+
+必ず相手のレベルに合わせて、理解しやすい言葉で回答してください。`
+          },
+          {
+            role: 'user',
+            content: message
+          }
+        ],
+        max_tokens: 500,
+        temperature: 0.7
+      })
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const gptResponse = data.choices[0].message.content;
+      
+      ws.send(JSON.stringify({
+        type: 'help-chat-response',
+        response: gptResponse
+      }));
+    } else if (response.status === 401) {
+      ws.send(JSON.stringify({
+        type: 'help-chat-error',
+        error: 'APIキーが無効です。設定を確認してください。'
+      }));
+    } else if (response.status === 429) {
+      ws.send(JSON.stringify({
+        type: 'help-chat-error',
+        error: 'API使用量の上限に達しました。しばらく待ってから再試行してください。'
+      }));
+    } else {
+      const errorData = await response.json().catch(() => ({}));
+      ws.send(JSON.stringify({
+        type: 'help-chat-error',
+        error: `APIエラー: ${errorData.error?.message || response.status}`
+      }));
+    }
+
+  } catch (error) {
+    console.error('Help chat error:', error);
+    ws.send(JSON.stringify({
+      type: 'help-chat-error',
+      error: 'ネットワークエラーが発生しました。接続を確認してください。'
+    }));
+  }
 }
 
 // Handle shell WebSocket connections
@@ -993,6 +1296,15 @@ async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden =
     if (a.type !== b.type) {
       return a.type === 'directory' ? -1 : 1;
     }
+    
+    // For files, sort by modification time (newest first)
+    if (a.type === 'file' && b.type === 'file') {
+      const aTime = new Date(a.modified || 0).getTime();
+      const bTime = new Date(b.modified || 0).getTime();
+      return bTime - aTime; // newest first
+    }
+    
+    // For directories, sort by name
     return a.name.localeCompare(b.name);
   });
 }

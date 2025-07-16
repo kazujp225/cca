@@ -142,7 +142,7 @@ function MainContent({
     <div className="h-full flex flex-col">
       {/* Header with tabs and controls */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex-shrink-0">
-        <div className="flex items-center justify-between px-4 py-3">
+        <div className="flex items-center justify-between px-3 py-2">
           <div className="flex items-center space-x-3">
             {isMobile && (
               <button
@@ -161,7 +161,7 @@ function MainContent({
             <div className="min-w-0">
               {activeTab === 'chat' && selectedSession ? (
                 <div>
-                  <h2 className="text-lg font-medium text-gray-900 dark:text-white truncate">
+                  <h2 className="text-base font-medium text-gray-900 dark:text-white truncate">
                     {selectedSession.summary}
                   </h2>
                   <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
@@ -170,7 +170,7 @@ function MainContent({
                 </div>
               ) : activeTab === 'chat' && !selectedSession ? (
                 <div>
-                  <h2 className="text-lg font-medium text-gray-900 dark:text-white">
+                  <h2 className="text-base font-medium text-gray-900 dark:text-white">
                     新しいセッション
                   </h2>
                   <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
@@ -179,7 +179,7 @@ function MainContent({
                 </div>
               ) : (
                 <div>
-                  <h2 className="text-lg font-medium text-gray-900 dark:text-white">
+                  <h2 className="text-base font-medium text-gray-900 dark:text-white">
                     {activeTab === 'files' ? 'プロジェクトファイル' : activeTab === 'git' ? 'ソース管理' : 'プロジェクト'}
                   </h2>
                   <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
@@ -195,7 +195,7 @@ function MainContent({
             {/* Theme Toggle - Minimalist */}
             <button
               onClick={toggleDarkMode}
-              className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+              className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
               title={isDarkMode ? "ライトモードに切り替え" : "ダークモードに切り替え"}
             >
               {isDarkMode ? (
@@ -208,7 +208,7 @@ function MainContent({
             {/* Logout Button - Minimalist */}
             <button
               onClick={logout}
-              className="p-2 text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+              className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
               title="ログアウト"
             >
               <LogOut className="w-4 h-4" />
@@ -219,7 +219,7 @@ function MainContent({
               <div className="flex bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
               <button
                 onClick={() => setActiveTab('chat')}
-                className={`relative px-2 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md ${
+                className={`relative px-2 sm:px-3 py-1 text-xs sm:text-sm font-medium rounded-md ${
                   activeTab === 'chat'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700'
@@ -234,7 +234,7 @@ function MainContent({
               </button>
               <button
                 onClick={() => setActiveTab('shell')}
-                className={`relative px-2 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
+                className={`relative px-2 sm:px-3 py-1 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
                   activeTab === 'shell'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700'
@@ -249,7 +249,7 @@ function MainContent({
               </button>
               <button
                 onClick={() => setActiveTab('files')}
-                className={`relative px-2 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
+                className={`relative px-2 sm:px-3 py-1 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
                   activeTab === 'files'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700'
@@ -264,7 +264,7 @@ function MainContent({
               </button>
               <button
                 onClick={() => setActiveTab('git')}
-                className={`relative px-2 sm:px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
+                className={`relative px-2 sm:px-3 py-1 text-xs sm:text-sm font-medium rounded-md transition-all duration-200 ${
                   activeTab === 'git'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700'

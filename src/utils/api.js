@@ -58,10 +58,10 @@ export const api = {
     authenticatedFetch(`/api/projects/${projectName}`, {
       method: 'DELETE',
     }),
-  createProject: (path) =>
+  createProject: (path, fileName = null, folderName = null) =>
     authenticatedFetch('/api/projects/create', {
       method: 'POST',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, fileName, folderName }),
     }),
   mkdir: (path) =>
     authenticatedFetch('/api/projects/mkdir', {
@@ -75,6 +75,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ filePath, content }),
     }),
+  deleteFile: (projectName, filePath) =>
+    authenticatedFetch(`/api/projects/${projectName}/file`, {
+      method: 'DELETE',
+      body: JSON.stringify({ filePath }),
+    }),
   getFiles: (projectName) =>
     authenticatedFetch(`/api/projects/${projectName}/files`),
   transcribe: (formData) =>
@@ -82,5 +87,10 @@ export const api = {
       method: 'POST',
       body: formData,
       headers: {}, // Let browser set Content-Type for FormData
+    }),
+  helpChat: (message) =>
+    authenticatedFetch('/api/help-chat', {
+      method: 'POST',
+      body: JSON.stringify({ message }),
     }),
 };

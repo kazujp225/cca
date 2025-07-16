@@ -24,6 +24,7 @@ import ClaudeLogo from './ClaudeLogo.jsx';
 
 import ClaudeStatus from './ClaudeStatus';
 import { MicButton } from './MicButton.jsx';
+import { SpeechButton } from './SpeechButton.jsx';
 import { api } from '../utils/api';
 
 // Memoized message component to prevent unnecessary re-renders
@@ -1087,7 +1088,6 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     if (!projectName || !sessionId) return [];
     
     console.log(`[ChatInterface] Loading session messages for project: ${projectName}, session: ${sessionId}`);
-    setIsLoadingSessionMessages(true);
     try {
       const response = await api.sessionMessages(projectName, sessionId);
       if (!response.ok) {
@@ -1100,8 +1100,6 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     } catch (error) {
       console.error('Error loading session messages:', error);
       return [];
-    } finally {
-      setIsLoadingSessionMessages(false);
     }
   }, []);
 
@@ -1255,10 +1253,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
   // Check if user is near the bottom of the scroll container
   const isNearBottom = useCallback(() => {
-    if (!scrollContainerRef.current) return false;
+    if (!scrollContainerRef.current) return true; // Default to true if ref not ready
     const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
-    // Consider "near bottom" if within 50px of the bottom
-    return scrollHeight - scrollTop - clientHeight < 50;
+    // Consider "near bottom" if within 100px of the bottom (more lenient)
+    return scrollHeight - scrollTop - clientHeight < 100;
   }, []);
 
   // Handle scroll events to detect when user manually scrolls up
@@ -1278,16 +1276,28 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         // Only load messages from API if this is a user-initiated session change
         // For system-initiated changes, preserve existing messages and rely on WebSocket
         if (!isSystemSessionChange) {
+          // Start loading
+          setIsLoadingSessionMessages(true);
+          
           // Clear existing messages first to ensure clean slate
           setSessionMessages([]);
           setChatMessages([]);
           
-          const messages = await loadSessionMessages(selectedProject.name, selectedSession.id);
-          setSessionMessages(messages);
-          // convertedMessages will be automatically updated via useMemo
-          // Scroll to bottom after loading session messages if auto-scroll is enabled
-          if (autoScrollToBottom) {
+          try {
+            const messages = await loadSessionMessages(selectedProject.name, selectedSession.id);
+            setSessionMessages(messages);
+            
+            // Convert and set messages immediately
+            const converted = convertSessionMessages(messages);
+            console.log(`[ChatInterface] Setting ${converted.length} converted messages for session ${selectedSession.id}`);
+            setChatMessages(converted);
+            
+            // Scroll to bottom after loading session messages
+            // Reset scroll state when loading new session
+            setIsUserScrolledUp(false);
             setTimeout(() => scrollToBottom(), 200);
+          } finally {
+            setIsLoadingSessionMessages(false);
           }
         } else {
           // Reset the flag after handling system session change
@@ -1301,17 +1311,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     };
     
     loadMessages();
-  }, [selectedSession, selectedProject, loadSessionMessages, scrollToBottom, isSystemSessionChange]);
-
-  // Update chatMessages when convertedMessages changes, but only when loading a session
-  useEffect(() => {
-    // Only update chatMessages when we're loading a session or switching sessions
-    // Don't overwrite during active conversations
-    if (isLoadingSessionMessages || !currentSessionId) {
-      console.log(`[ChatInterface] Updating chatMessages with ${convertedMessages.length} converted messages`);
-      setChatMessages(convertedMessages);
-    }
-  }, [convertedMessages, isLoadingSessionMessages, currentSessionId]);
+  }, [selectedSession, selectedProject, scrollToBottom, isSystemSessionChange]);
 
   // Notify parent when input focus changes
   useEffect(() => {
@@ -1678,6 +1678,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
   // Show only recent messages for better performance
   const visibleMessages = useMemo(() => {
+    console.log(`[ChatInterface] visibleMessages calculation: chatMessages.length=${chatMessages.length}, visibleMessageCount=${visibleMessageCount}`);
     if (chatMessages.length <= visibleMessageCount) {
       return chatMessages;
     }
@@ -1701,7 +1702,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       if (autoScrollToBottom) {
         // If auto-scroll is enabled, always scroll to bottom unless user has manually scrolled up
         if (!isUserScrolledUp) {
-          setTimeout(() => scrollToBottom(), 50); // Small delay to ensure DOM is updated
+          // Only scroll if we're near the bottom to avoid interrupting user's reading
+          if (isNearBottom()) {
+            setTimeout(() => scrollToBottom(), 50); // Small delay to ensure DOM is updated
+          }
         }
       } else {
         // When auto-scroll is disabled, preserve the visual position
@@ -1717,17 +1721,16 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         }
       }
     }
-  }, [chatMessages.length, isUserScrolledUp, scrollToBottom, autoScrollToBottom]);
+  }, [chatMessages.length, isUserScrolledUp, scrollToBottom, autoScrollToBottom, isNearBottom]);
 
-  // Scroll to bottom when component mounts with existing messages or when messages first load
+  // Scroll to bottom only when session changes or initial load
   useEffect(() => {
-    if (scrollContainerRef.current && chatMessages.length > 0) {
-      // Always scroll to bottom when messages first load (user expects to see latest)
-      // Also reset scroll state
+    if (scrollContainerRef.current && chatMessages.length > 0 && selectedSession) {
+      // Only scroll to bottom when session changes, not on every update
       setIsUserScrolledUp(false);
       setTimeout(() => scrollToBottom(), 200); // Longer delay to ensure full rendering
     }
-  }, [chatMessages.length > 0, scrollToBottom]); // Trigger when messages first appear
+  }, [selectedSession?.id, scrollToBottom]); // Trigger only when session changes
 
   // Add scroll event listener to detect user scrolling
   useEffect(() => {
@@ -1780,6 +1783,12 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         return newInput;
       });
     }
+  }, []);
+
+  // 音声認識の中間結果を処理
+  const handleInterimTranscript = useCallback((interimText) => {
+    // 中間結果をプレースホルダーとして表示（実装可能）
+    console.log('Interim transcript:', interimText);
   }, []);
 
   // Load earlier messages by increasing the visible message count
@@ -2411,12 +2420,26 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               </svg>
             </button>
             
-            {/* Mic button - HIDDEN */}
-            <div className="absolute right-16 sm:right-16 top-1/2 transform -translate-y-1/2" style={{ display: 'none' }}>
-              <MicButton 
+            {/* Speech Recognition Buttons */}
+            <div className="absolute right-16 sm:right-16 top-1/2 transform -translate-y-1/2 flex items-center space-x-2">
+              {/* Web Speech API Button (Primary) */}
+              <SpeechButton 
                 onTranscript={handleTranscript}
-                className="w-10 h-10 sm:w-10 sm:h-10"
+                onInterimTranscript={handleInterimTranscript}
+                size="default"
+                showSettings={true}
+                continuous={false}
+                language="ja-JP"
+                disabled={isLoading}
               />
+              
+              {/* Whisper API Button (Secondary) - HIDDEN by default */}
+              <div style={{ display: 'none' }}>
+                <MicButton 
+                  onTranscript={handleTranscript}
+                  className="w-10 h-10 sm:w-10 sm:h-10"
+                />
+              </div>
             </div>
             {/* Send button */}
             <button
