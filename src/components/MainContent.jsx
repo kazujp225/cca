@@ -19,6 +19,7 @@ import Shell from './Shell';
 import GitPanel from './GitPanel';
 import LivePreviewPanel from './LivePreviewPanel';
 import ParticleBackground from './ParticleBackground';
+import ErrorBoundary from './ErrorBoundary';
 import { useTheme } from '../contexts/ThemeContext';
 import { useAuth } from '../contexts/AuthContext';
 import { Moon, Sun, LogOut } from 'lucide-react';
@@ -344,7 +345,7 @@ function MainContent({
               > 
                 <span className="flex items-center gap-1 sm:gap-1.5">
                   <svg className="w-3 sm:w-3.5 h-3 sm:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 919-9" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
                   </svg>
                   <span className="hidden sm:inline">プレビュー</span>
                 </span>
@@ -358,29 +359,30 @@ function MainContent({
       {/* Content Area */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className={`h-full ${activeTab === 'chat' ? 'block' : 'hidden'}`}>
-          <ChatInterface
-            selectedProject={selectedProject}
-            selectedSession={selectedSession}
-            ws={ws}
-            sendMessage={sendMessage}
-            messages={messages}
-            onFileOpen={handleFileOpen}
-            onInputFocusChange={onInputFocusChange}
-            onSessionActive={onSessionActive}
-            onSessionInactive={onSessionInactive}
-            onReplaceTemporarySession={onReplaceTemporarySession}
-            onNavigateToSession={onNavigateToSession}
-            onShowSettings={onShowSettings}
-            autoExpandTools={autoExpandTools}
-            showRawParameters={showRawParameters}
-            autoScrollToBottom={autoScrollToBottom}
-          />
+          <ErrorBoundary>
+            <ChatInterface
+              selectedProject={selectedProject}
+              selectedSession={selectedSession}
+              ws={ws}
+              sendMessage={sendMessage}
+              messages={messages}
+              onFileOpen={handleFileOpen}
+              onInputFocusChange={onInputFocusChange}
+              onSessionActive={onSessionActive}
+              onSessionInactive={onSessionInactive}
+              onReplaceTemporarySession={onReplaceTemporarySession}
+              onNavigateToSession={onNavigateToSession}
+              onShowSettings={onShowSettings}
+              autoExpandTools={autoExpandTools}
+              showRawParameters={showRawParameters}
+              autoScrollToBottom={autoScrollToBottom}
+            />
+          </ErrorBoundary>
         </div>
         <div className={`h-full overflow-hidden ${activeTab === 'files' ? 'block' : 'hidden'}`}>
           <FileTree selectedProject={selectedProject} />
         </div>
         <div className={`h-full overflow-hidden ${activeTab === 'shell' ? 'block' : 'hidden'}`}>
-          {/* Only render Shell component when shell tab is active to prevent background processes */}
           {activeTab === 'shell' && (
             <Shell 
               selectedProject={selectedProject} 

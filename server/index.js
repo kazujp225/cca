@@ -44,6 +44,7 @@ import mcpRoutes from './routes/mcp.js';
 import helpChatRoutes from './helpChat.js';
 import { initializeDatabase } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
+import { executeShellCommand, executeUltrathink } from './shell-handler.js';
 import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 
@@ -156,9 +157,18 @@ const wss = new WebSocketServer({
     
     console.log('Token found:', token ? 'Yes' : 'No');
     
-    // For /shell endpoint, skip authentication
+    // For /shell endpoint, we still need to verify the token
     if (url.pathname === '/shell') {
-      console.log('✅ Shell WebSocket - skipping authentication');
+      console.log('🔐 Shell WebSocket - verifying authentication');
+      // Verify token even for shell endpoint
+      const user = authenticateWebSocket(token);
+      if (!user) {
+        console.log('❌ Shell WebSocket authentication failed');
+        cb(false, 401, 'Unauthorized');
+        return;
+      }
+      info.req.user = user;
+      console.log('✅ Shell WebSocket authenticated for user:', user.username);
       cb(true);
       return;
     }
@@ -722,6 +732,12 @@ app.post('/api/projects/:projectName/open-terminal', authenticateToken, async (r
   }
 });
 
+// Execute shell command
+app.post('/api/shell/execute', authenticateToken, executeShellCommand);
+
+// Execute ultrathink command
+app.post('/api/ultrathink', authenticateToken, executeUltrathink);
+
 app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
   try {
     
@@ -762,10 +778,10 @@ wss.on('connection', (ws, request) => {
   const urlObj = new URL(url, 'http://localhost');
   const pathname = urlObj.pathname;
   
-  if (pathname === '/shell') {
-    handleShellConnection(ws);
-  } else if (pathname === '/ws') {
-    handleChatConnection(ws);
+  if (pathname === '/ws') {
+    handleChatConnection(ws, request);
+  } else if (pathname === '/shell') {
+    handleShellConnection(ws, request);
   } else {
     console.log('❌ Unknown WebSocket path:', pathname);
     ws.close();
@@ -781,7 +797,11 @@ function handleChatConnection(ws) {
   
   ws.on('message', async (message) => {
     try {
-      const data = JSON.parse(message);
+      // Clean message before parsing
+      const cleanMessage = message.toString().trim().replace(/\u0000/g, '').replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+      if (!cleanMessage) return;
+      
+      const data = JSON.parse(cleanMessage);
       
       if (data.type === 'claude-command') {
         console.log('💬 User message:', data.command || '[Continue/Resume]');
@@ -811,10 +831,15 @@ function handleChatConnection(ws) {
       }
     } catch (error) {
       console.error('❌ Chat WebSocket error:', error.message);
-      ws.send(JSON.stringify({
-        type: 'error',
-        error: error.message
-      }));
+      console.error('❌ Error stack:', error.stack);
+      try {
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: error.message
+        }));
+      } catch (sendError) {
+        console.error('❌ Failed to send error message:', sendError.message);
+      }
     }
   });
   
@@ -822,6 +847,116 @@ function handleChatConnection(ws) {
     console.log('🔌 Chat client disconnected');
     // Remove from connected clients
     connectedClients.delete(ws);
+  });
+}
+
+// Handle shell WebSocket connections
+function handleShellConnection(ws, request) {
+  console.log('🐚 Shell WebSocket connected');
+  
+  // Get user info from request
+  const user = request.user;
+  if (!user) {
+    console.error('❌ Shell connection without user info');
+    ws.close();
+    return;
+  }
+  
+  // Track shell sessions
+  let shellProcess = null;
+  let currentPath = process.cwd();
+  
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      
+      if (data.type === 'shell:command') {
+        const { command, projectPath } = data;
+        console.log('🐚 Shell command:', command);
+        
+        // Execute command
+        const workingDir = currentPath || projectPath || process.cwd();
+        
+        try {
+          // Security check - reuse existing dangerous command patterns
+          const dangerousCommands = [
+            'rm -rf /', 'format', 'del /f', 'sudo', 'su', 'chmod 777', 'chown',
+            'passwd', 'fdisk', 'mkfs', 'dd if=', 'killall', 'pkill', 'halt',
+            'reboot', 'shutdown', 'init', 'systemctl', 'service', 'mount',
+            'umount', 'crontab', 'at ', 'batch', 'nohup', 'screen', 'tmux'
+          ];
+          
+          if (dangerousCommands.some(cmd => command.toLowerCase().includes(cmd.toLowerCase()))) {
+            ws.send(JSON.stringify({
+              type: 'shell:error',
+              error: 'Command not allowed for security reasons'
+            }));
+            return;
+          }
+          
+          // Execute command using child_process
+          // Create clean environment without Claude Code UI specific variables
+          const cleanEnv = { ...process.env };
+          delete cleanEnv.PORT; // Remove PORT to allow child processes to find available port
+          delete cleanEnv.VITE_PORT;
+          delete cleanEnv.VITE_API_PORT;
+          
+          const { stdout, stderr } = await execAsync(command, {
+            cwd: workingDir,
+            env: { 
+              ...cleanEnv,
+              FORCE_COLOR: '1',
+              TERM: 'xterm-256color',
+              COLORTERM: 'truecolor'
+            },
+            encoding: 'utf8',
+            shell: true
+          });
+          
+          // Check if directory changed (cd command)
+          if (command.trim().startsWith('cd ')) {
+            const targetDir = command.trim().slice(3).trim();
+            if (targetDir) {
+              const newPath = path.resolve(workingDir, targetDir);
+              try {
+                await fs.access(newPath);
+                currentPath = newPath;
+              } catch {
+                // Directory doesn't exist, keep current path
+              }
+            }
+          }
+          
+          // Send output
+          ws.send(JSON.stringify({
+            type: 'shell:output',
+            stdout,
+            stderr,
+            currentPath
+          }));
+        } catch (error) {
+          ws.send(JSON.stringify({
+            type: 'shell:output',
+            stdout: '',
+            stderr: error.message || 'Command failed',
+            exitCode: error.code || 1
+          }));
+        }
+      }
+    } catch (error) {
+      console.error('❌ Shell WebSocket error:', error);
+      ws.send(JSON.stringify({
+        type: 'shell:error',
+        error: error.message
+      }));
+    }
+  });
+  
+  ws.on('close', () => {
+    console.log('🐚 Shell WebSocket disconnected');
+    if (shellProcess) {
+      shellProcess.kill();
+    }
   });
 }
 
@@ -1197,216 +1332,6 @@ async function handleServerStatus(projectPath, ws) {
   }
 }
 
-// Handle shell WebSocket connections
-function handleShellConnection(ws) {
-  console.log('🐚 Shell client connected');
-  let shellProcess = null;
-  
-  ws.on('message', async (message) => {
-    try {
-      const data = JSON.parse(message);
-      console.log('📨 Shell message received:', data.type);
-      
-      if (data.type === 'init') {
-        // Initialize shell with project path and session info
-        const projectPath = data.projectPath || process.cwd();
-        const sessionId = data.sessionId;
-        const hasSession = data.hasSession;
-        
-        console.log('🚀 Starting shell in:', projectPath);
-        console.log('📋 Session info:', hasSession ? `Resume session ${sessionId}` : 'New session');
-        
-        // First send a welcome message
-        const welcomeMsg = hasSession ? 
-          `\x1b[36mResuming Claude session ${sessionId} in: ${projectPath}\x1b[0m\r\n` :
-          `\x1b[36mStarting new Claude session in: ${projectPath}\x1b[0m\r\n`;
-        
-        ws.send(JSON.stringify({
-          type: 'output',
-          data: welcomeMsg
-        }));
-        
-        try {
-          // Allow custom command through environment variable
-          const customCommand = process.env.CLAUDE_CLI_COMMAND || 'claude';
-          
-          // Build shell command that changes to project directory first, then runs claude
-          let claudeCommand = customCommand;
-          
-          if (hasSession && sessionId) {
-            // Try to resume session, but with fallback to new session if it fails
-            claudeCommand = `${customCommand} --resume ${sessionId} || ${customCommand}`;
-          }
-          
-          // Create shell command that cds to the project directory first
-          // First check if claude is available
-          const checkAndRunCommand = `
-            cd "${projectPath}" && 
-            if command -v ${customCommand} &> /dev/null; then
-              ${claudeCommand}
-            else
-              echo -e "\\x1b[31m❌ Error: '${customCommand}' command not found\\x1b[0m"
-              echo -e "\\x1b[33m"
-              if [ "${customCommand}" = "claude" ]; then
-                echo -e "Claude CLI is not installed or not in your PATH."
-                echo -e ""
-                echo -e "To install Claude CLI, please run:"
-                echo -e "\\x1b[36m  npm install -g @anthropic-ai/claude-cli\\x1b[0m"
-                echo -e ""
-                echo -e "Or if you have Claude CLI installed in a custom location,"
-                echo -e "please make sure it's in your PATH."
-              else
-                echo -e "The custom command '${customCommand}' is not installed or not in your PATH."
-                echo -e ""
-                echo -e "Please make sure '${customCommand}' is installed and available in your PATH."
-                echo -e ""
-                echo -e "You can set a different command by setting the CLAUDE_CLI_COMMAND"
-                echo -e "environment variable in your .env file."
-              fi
-              echo -e "\\x1b[0m"
-              exit 1
-            fi
-          `;
-          
-          const shellCommand = checkAndRunCommand.trim();
-          
-          console.log('🔧 Executing shell command with claude check');
-          
-          // Start shell using PTY for proper terminal emulation
-          shellProcess = pty.spawn('bash', ['-c', shellCommand], {
-            name: 'xterm-256color',
-            cols: 80,
-            rows: 24,
-            cwd: process.env.HOME || '/', // Start from home directory
-            env: { 
-              ...process.env,
-              TERM: 'xterm-256color',
-              COLORTERM: 'truecolor',
-              FORCE_COLOR: '3',
-              // Override browser opening commands to echo URL for detection
-              BROWSER: 'echo "OPEN_URL:"'
-            }
-          });
-          
-          console.log('🟢 Shell process started with PTY, PID:', shellProcess.pid);
-          
-          // Handle data output
-          shellProcess.onData((data) => {
-            if (ws.readyState === ws.OPEN) {
-              let outputData = data;
-              
-              // Check for various URL opening patterns
-              const patterns = [
-                // Direct browser opening commands
-                /(?:xdg-open|open|start)\s+(https?:\/\/[^\s\x1b\x07]+)/g,
-                // BROWSER environment variable override
-                /OPEN_URL:\s*(https?:\/\/[^\s\x1b\x07]+)/g,
-                // Git and other tools opening URLs
-                /Opening\s+(https?:\/\/[^\s\x1b\x07]+)/gi,
-                // General URL patterns that might be opened
-                /Visit:\s*(https?:\/\/[^\s\x1b\x07]+)/gi,
-                /View at:\s*(https?:\/\/[^\s\x1b\x07]+)/gi,
-                /Browse to:\s*(https?:\/\/[^\s\x1b\x07]+)/gi
-              ];
-              
-              patterns.forEach(pattern => {
-                let match;
-                while ((match = pattern.exec(data)) !== null) {
-                  const url = match[1];
-                  console.log('🔗 Detected URL for opening:', url);
-                  
-                  // Send URL opening message to client
-                  ws.send(JSON.stringify({
-                    type: 'url_open',
-                    url: url
-                  }));
-                  
-                  // Replace the OPEN_URL pattern with a user-friendly message
-                  if (pattern.source.includes('OPEN_URL')) {
-                    outputData = outputData.replace(match[0], `🌐 Opening in browser: ${url}`);
-                  }
-                }
-              });
-              
-              // Send regular output
-              ws.send(JSON.stringify({
-                type: 'output',
-                data: outputData
-              }));
-            }
-          });
-          
-          // Handle process exit
-          shellProcess.onExit((exitCode) => {
-            console.log('🔚 Shell process exited with code:', exitCode.exitCode, 'signal:', exitCode.signal);
-            if (ws.readyState === ws.OPEN) {
-              let exitMessage = '';
-              if (exitCode.exitCode === 1) {
-                exitMessage = `\r\n\x1b[33m⚠️ Process exited with error (code ${exitCode.exitCode})\x1b[0m\r\n`;
-                exitMessage += `\x1b[33mThis usually means Claude CLI is not installed or configured properly.\x1b[0m\r\n`;
-              } else if (exitCode.exitCode === 0) {
-                exitMessage = `\r\n\x1b[32m✓ Claude session ended successfully\x1b[0m\r\n`;
-              } else {
-                exitMessage = `\r\n\x1b[33mProcess exited with code ${exitCode.exitCode}${exitCode.signal ? ` (${exitCode.signal})` : ''}\x1b[0m\r\n`;
-              }
-              
-              ws.send(JSON.stringify({
-                type: 'output',
-                data: exitMessage
-              }));
-            }
-            shellProcess = null;
-          });
-          
-        } catch (spawnError) {
-          console.error('❌ Error spawning process:', spawnError);
-          ws.send(JSON.stringify({
-            type: 'output',
-            data: `\r\n\x1b[31mError: ${spawnError.message}\x1b[0m\r\n`
-          }));
-        }
-        
-      } else if (data.type === 'input') {
-        // Send input to shell process
-        if (shellProcess && shellProcess.write) {
-          try {
-            shellProcess.write(data.data);
-          } catch (error) {
-            console.error('Error writing to shell:', error);
-          }
-        } else {
-          console.warn('No active shell process to send input to');
-        }
-      } else if (data.type === 'resize') {
-        // Handle terminal resize
-        if (shellProcess && shellProcess.resize) {
-          console.log('Terminal resize requested:', data.cols, 'x', data.rows);
-          shellProcess.resize(data.cols, data.rows);
-        }
-      }
-    } catch (error) {
-      console.error('❌ Shell WebSocket error:', error.message);
-      if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'output',
-          data: `\r\n\x1b[31mError: ${error.message}\x1b[0m\r\n`
-        }));
-      }
-    }
-  });
-  
-  ws.on('close', () => {
-    console.log('🔌 Shell client disconnected');
-    if (shellProcess && shellProcess.kill) {
-      console.log('🔴 Killing shell process:', shellProcess.pid);
-      shellProcess.kill();
-    }
-  });
-  
-  ws.on('error', (error) => {
-    console.error('❌ Shell WebSocket error:', error);
-  });
-}
 // Audio transcription endpoint
 app.post('/api/transcribe', authenticateToken, async (req, res) => {
   try {

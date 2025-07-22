@@ -18,7 +18,7 @@
  * Handles both existing sessions (with real IDs) and new sessions (with temporary IDs).
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
 import './styles/optimizedChat.css';
 import Sidebar from './components/Sidebar';
@@ -40,6 +40,7 @@ import { api } from './utils/api';
 
 // Main App component with routing
 function AppContent() {
+  // console.log('AppContent component rendering');
   const navigate = useNavigate();
   
   const { updateAvailable, latestVersion, currentVersion } = useVersionCheck('siteboon', 'claudecodeui');
@@ -56,6 +57,7 @@ function AppContent() {
     return saved ? JSON.parse(saved) : false;
   });
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+  const [appError, setAppError] = useState(null);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showToolsSettings, setShowToolsSettings] = useState(false);
   const [showQuickSettings, setShowQuickSettings] = useState(false);
@@ -141,96 +143,154 @@ function AppContent() {
   };
 
   // Handle WebSocket messages for real-time project updates
-  useEffect(() => {
-    if (messages.length > 0) {
-      const latestMessage = messages[messages.length - 1];
+  // Fixed: Use ref to avoid dependency issues and prevent infinite loops
+  const latestValuesRef = useRef();
+  latestValuesRef.current = { projects, selectedProject, selectedSession, activeSessions };
+
+  const handleWebSocketMessage = useCallback((latestMessage) => {
+    if (latestMessage.type === 'projects_updated') {
+      const { projects: currentProjects, selectedProject: currentSelectedProject, selectedSession: currentSelectedSession, activeSessions: currentActiveSessions } = latestValuesRef.current;
       
-      if (latestMessage.type === 'projects_updated') {
+      // Session Protection Logic: Allow additions but prevent changes during active conversations
+      const hasActiveSession = (currentSelectedSession && currentActiveSessions.has(currentSelectedSession.id)) ||
+                               (currentActiveSessions.size > 0 && Array.from(currentActiveSessions).some(id => id.startsWith('new-session-')));
+      
+      if (hasActiveSession) {
+        // Check if this is purely additive (new sessions/projects) vs modification of existing ones
+        const isAdditiveUpdate = isUpdateAdditive(currentProjects, latestMessage.projects, currentSelectedProject, currentSelectedSession);
         
-        // Session Protection Logic: Allow additions but prevent changes during active conversations
-        // This allows new sessions/projects to appear in sidebar while protecting active chat messages
-        // We check for two types of active sessions:
-        // 1. Existing sessions: selectedSession.id exists in activeSessions
-        // 2. New sessions: temporary "new-session-*" identifiers in activeSessions (before real session ID is received)
-        const hasActiveSession = (selectedSession && activeSessions.has(selectedSession.id)) ||
-                                 (activeSessions.size > 0 && Array.from(activeSessions).some(id => id.startsWith('new-session-')));
-        
-        if (hasActiveSession) {
-          // Allow updates but be selective: permit additions, prevent changes to existing items
-          const updatedProjects = latestMessage.projects;
-          const currentProjects = projects;
-          
-          // Check if this is purely additive (new sessions/projects) vs modification of existing ones
-          const isAdditiveUpdate = isUpdateAdditive(currentProjects, updatedProjects, selectedProject, selectedSession);
-          
-          if (!isAdditiveUpdate) {
-            // Skip updates that would modify existing selected session/project
-            return;
-          }
-          // Continue with additive updates below
+        if (!isAdditiveUpdate) {
+          // Skip updates that would modify existing selected session/project
+          console.log('Skipping non-additive update during active session');
+          return;
         }
-        
-        // Update projects state with the new data from WebSocket
-        const updatedProjects = latestMessage.projects;
-        setProjects(updatedProjects);
-        
-        // Update selected project if it exists in the updated projects
-        if (selectedProject) {
-          const updatedSelectedProject = updatedProjects.find(p => p.name === selectedProject.name);
-          if (updatedSelectedProject) {
-            setSelectedProject(updatedSelectedProject);
-            
-            // Update selected session only if it was deleted - avoid unnecessary reloads
-            if (selectedSession) {
-              const updatedSelectedSession = updatedSelectedProject.sessions?.find(s => s.id === selectedSession.id);
-              if (!updatedSelectedSession) {
-                // Session was deleted
-                setSelectedSession(null);
-              }
-              // Don't update if session still exists with same ID - prevents reload
+      }
+      
+      // Update projects state with the new data from WebSocket
+      const updatedProjects = latestMessage.projects;
+      setProjects(updatedProjects);
+      
+      // Update selected project if it exists in the updated projects (batch update)
+      if (currentSelectedProject) {
+        const updatedSelectedProject = updatedProjects.find(p => p.name === currentSelectedProject.name);
+        if (updatedSelectedProject) {
+          setSelectedProject(updatedSelectedProject);
+          
+          // Update selected session only if it was deleted - avoid unnecessary reloads
+          if (currentSelectedSession) {
+            const updatedSelectedSession = updatedSelectedProject.sessions?.find(s => s.id === currentSelectedSession.id);
+            if (!updatedSelectedSession) {
+              // Session was deleted
+              console.log('Selected session was deleted, clearing selection');
+              setSelectedSession(null);
             }
           }
         }
       }
     }
-  }, [messages, selectedProject, selectedSession, activeSessions]);
+  }, []); // Empty dependency array - use ref for current values
+
+  // Fixed: Only depend on messages.length to prevent infinite loops
+  useEffect(() => {
+    if (messages.length > 0) {
+      const latestMessage = messages[messages.length - 1];
+      handleWebSocketMessage(latestMessage);
+    }
+  }, [messages.length, handleWebSocketMessage]);
 
   const fetchProjects = async () => {
     try {
       setIsLoadingProjects(true);
-      const response = await api.projects();
+      setAppError(null);
+      
+      // タイムアウト付きでプロジェクトを取得
+      const fetchWithTimeout = async (timeout = 20000) => {
+        return Promise.race([
+          api.projects(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('プロジェクト読み込みがタイムアウトしました')), timeout)
+          )
+        ]);
+      };
+      
+      const response = await fetchWithTimeout(20000);
+      
+      if (!response.ok) {
+        throw new Error(`プロジェクト読み込みエラー: ${response.status}`);
+      }
+      
       const data = await response.json();
       
-      // Optimize to preserve object references when data hasn't changed
+      // データの妥当性チェック
+      if (!Array.isArray(data)) {
+        console.warn('Invalid projects data format:', data);
+        setProjects([]);
+        return;
+      }
+      
+      // Fixed: Optimize to preserve object references when data hasn't changed
+      // Use lightweight comparison instead of heavy JSON.stringify
       setProjects(prevProjects => {
         // If no previous projects, just set the new data
         if (prevProjects.length === 0) {
           return data;
         }
         
-        // Check if the projects data has actually changed
+        // Quick length check first
+        if (data.length !== prevProjects.length) {
+          return data;
+        }
+        
+        // Lightweight comparison - only check key fields that affect UI
         const hasChanges = data.some((newProject, index) => {
           const prevProject = prevProjects[index];
           if (!prevProject) return true;
           
-          // Compare key properties that would affect UI
-          return (
-            newProject.name !== prevProject.name ||
-            newProject.displayName !== prevProject.displayName ||
-            newProject.fullPath !== prevProject.fullPath ||
-            JSON.stringify(newProject.sessionMeta) !== JSON.stringify(prevProject.sessionMeta) ||
-            JSON.stringify(newProject.sessions) !== JSON.stringify(prevProject.sessions)
-          );
-        }) || data.length !== prevProjects.length;
+          try {
+            // Compare basic properties
+            if (newProject.name !== prevProject.name ||
+                newProject.displayName !== prevProject.displayName ||
+                newProject.fullPath !== prevProject.fullPath) {
+              return true;
+            }
+            
+            // Compare session count instead of full session data
+            const newSessionCount = newProject.sessions?.length || 0;
+            const prevSessionCount = prevProject.sessions?.length || 0;
+            if (newSessionCount !== prevSessionCount) {
+              return true;
+            }
+            
+            // Compare session IDs as a lightweight check
+            if (newProject.sessions && prevProject.sessions) {
+              const newIds = newProject.sessions.map(s => s.id).sort().join(',');
+              const prevIds = prevProject.sessions.map(s => s.id).sort().join(',');
+              if (newIds !== prevIds) {
+                return true;
+              }
+            }
+            
+            return false;
+          } catch (compareError) {
+            console.warn('Error comparing projects:', compareError);
+            return true; // エラー時は更新する
+          }
+        });
         
         // Only update if there are actual changes
         return hasChanges ? data : prevProjects;
       });
       
-      // Don't auto-select any project - user should choose manually
     } catch (error) {
       console.error('Error fetching projects:', error);
+      // エラーが発生してもアプリケーションは表示する
+      setAppError(`プロジェクトの読み込みに失敗しました: ${error.message}`);
+      // 空の配列をセットして、UIは表示されるようにする
+      if (projects.length === 0) {
+        setProjects([]);
+      }
     } finally {
+      // 必ずローディング状態を解除
       setIsLoadingProjects(false);
     }
   };
@@ -239,13 +299,57 @@ function AppContent() {
   window.refreshProjects = fetchProjects;
 
 
-  const handleProjectSelect = (project) => {
+  const handleProjectSelect = async (project) => {
+    console.log('[App] handleProjectSelect called with project:', project);
     setSelectedProject(project);
     setSelectedSession(null);
     // プロジェクト選択時は常にメインページに戻る
     navigate('/');
     if (isMobile) {
       setSidebarOpen(false);
+    }
+    
+    // ULTRATHINK OPTIMIZATION: Load sessions for the selected project if not already loaded
+    // Always load sessions to ensure we have the latest data
+    if (project) {
+      try {
+        console.log(`[App] Loading sessions for project: ${project.name}`);
+        const response = await api.sessions(project.name, 10, 0); // Load first 10 sessions
+        if (response.ok) {
+          const sessionData = await response.json();
+          
+          // Update the selected project with loaded sessions
+          setProjects(prevProjects => 
+            prevProjects.map(p => 
+              p.name === project.name 
+                ? { ...p, sessions: sessionData.sessions || [], sessionMeta: { ...p.sessionMeta, hasMore: sessionData.hasMore, total: sessionData.total } }
+                : p
+            )
+          );
+          
+          // Update the selected project state with sessions
+          const updatedProject = { ...project, sessions: sessionData.sessions || [] };
+          setSelectedProject(updatedProject);
+          
+          console.log(`[App] Loaded ${sessionData.sessions?.length || 0} sessions for project ${project.name}`);
+          
+          // ULTRATHINK: Auto-select the first session if available
+          if (sessionData.sessions && sessionData.sessions.length > 0) {
+            // Switch to chat tab if not on git/preview
+            if (activeTab !== 'git' && activeTab !== 'preview') {
+              setActiveTab('chat');
+            }
+            
+            // Auto-select the most recent session
+            const mostRecentSession = sessionData.sessions[0]; // Sessions are already sorted by lastActivity
+            setSelectedSession(mostRecentSession);
+            console.log(`[App] Auto-selected session: ${mostRecentSession.id}`);
+          }
+        }
+      } catch (error) {
+        console.error(`[App] Failed to load sessions for project ${project.name}:`, error);
+        // Continue even if session loading fails - don't block the UI
+      }
     }
   };
 
@@ -646,6 +750,7 @@ function AppContent() {
 
 // Root App component with router
 function App() {
+  // console.log('App component rendering');
   return (
     <ThemeProvider>
       <AuthProvider>

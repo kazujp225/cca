@@ -107,6 +107,17 @@ function Sidebar({
     return () => clearInterval(timer);
   }, []);
 
+  // ULTRATHINK: Auto-expand selected project to show sessions
+  useEffect(() => {
+    if (selectedProject && selectedProject.name) {
+      setExpandedProjects(prev => {
+        const newSet = new Set(prev);
+        newSet.add(selectedProject.name);
+        return newSet;
+      });
+    }
+  }, [selectedProject]);
+
   // Handle keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -159,6 +170,12 @@ function Sidebar({
     const initialSessions = project.sessions || [];
     const additional = additionalSessions[project.name] || [];
     
+    console.log(`[Sidebar] Getting sessions for project ${project.name}:`, {
+      initialSessions: initialSessions.length,
+      additionalSessions: additional.length,
+      projectData: project
+    });
+    
     // Combine and deduplicate based on session ID
     const sessionMap = new Map();
     
@@ -172,7 +189,10 @@ function Sidebar({
       sessionMap.set(session.id, session);
     });
     
-    return Array.from(sessionMap.values());
+    const allSessions = Array.from(sessionMap.values());
+    console.log(`[Sidebar] Total sessions for ${project.name}: ${allSessions.length}`);
+    
+    return allSessions;
   };
 
   const sortSessionsByDate = (sessions) => {

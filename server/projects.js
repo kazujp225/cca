@@ -72,7 +72,6 @@ async function extractProjectDirectory(projectName) {
     return projectDirectoryCache.get(projectName);
   }
   
-  
   const projectDir = path.join(process.env.HOME, '.claude', 'projects', projectName);
   const cwdCounts = new Map();
   let latestTimestamp = 0;
@@ -87,8 +86,18 @@ async function extractProjectDirectory(projectName) {
       // Fall back to decoded project name if no sessions
       extractedPath = projectName.replace(/-/g, '/');
     } else {
-      // Process all JSONL files to collect cwd values
-      for (const file of jsonlFiles) {
+      // OPTIMIZATION: Only read the first 50 lines from the most recent 3 files
+      // This drastically reduces processing time while still capturing the project directory
+      const sortedFiles = jsonlFiles
+        .map(file => {
+          const filePath = path.join(projectDir, file);
+          const stats = fsSync.statSync(filePath);
+          return { file, mtime: stats.mtime.getTime() };
+        })
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, 3); // Only check 3 most recent files
+      
+      for (const { file } of sortedFiles) {
         const jsonlFile = path.join(projectDir, file);
         const fileStream = fsSync.createReadStream(jsonlFile);
         const rl = readline.createInterface({
@@ -96,10 +105,18 @@ async function extractProjectDirectory(projectName) {
           crlfDelay: Infinity
         });
         
+        let linesRead = 0;
+        const maxLinesToRead = 50; // OPTIMIZATION: Only read first 50 lines per file
+        
         for await (const line of rl) {
-          if (line.trim()) {
+          if (++linesRead > maxLinesToRead) {
+            break; // Stop reading after 50 lines
+          }
+          
+          const trimmedLine = line.trim();
+          if (trimmedLine && trimmedLine.startsWith('{') && trimmedLine.endsWith('}')) {
             try {
-              const entry = JSON.parse(line);
+              const entry = JSON.parse(trimmedLine);
               
               if (entry.cwd) {
                 // Count occurrences of each cwd
@@ -117,6 +134,9 @@ async function extractProjectDirectory(projectName) {
             }
           }
         }
+        
+        rl.close();
+        fileStream.destroy();
       }
       
       // Determine the best cwd to use
@@ -183,24 +203,17 @@ async function getProjects() {
         existingProjects.add(entry.name);
         const projectPath = path.join(claudeDir, entry.name);
         
-        // Extract actual project directory from JSONL sessions
-        const actualProjectDir = await extractProjectDirectory(entry.name);
+        // PERFORMANCE OPTIMIZATION: Skip expensive directory extraction for initial load
+        // Use simple decode of project name instead
+        const actualProjectDir = entry.name.replace(/-/g, '/');
         
-        // Get display name from config or generate one
+        // Get display name from config or use simple decode
         const customName = config[entry.name]?.displayName;
-        const autoDisplayName = await generateDisplayName(entry.name, actualProjectDir);
+        const autoDisplayName = customName || actualProjectDir;
         const fullPath = actualProjectDir;
         
-        // Get folder creation time if createdAt is not in config
-        let createdAt = config[entry.name]?.createdAt || null;
-        if (!createdAt) {
-          try {
-            const stats = await fs.stat(projectPath);
-            createdAt = stats.birthtime.toISOString();
-          } catch (error) {
-            console.warn(`Could not get folder creation time for ${entry.name}:`, error.message);
-          }
-        }
+        // PERFORMANCE OPTIMIZATION: Use current timestamp if creation time not in config
+        const createdAt = config[entry.name]?.createdAt || new Date().toISOString();
         
         const project = {
           name: entry.name,
@@ -212,16 +225,22 @@ async function getProjects() {
           sessions: []
         };
         
-        // Try to get sessions for this project (just first 5 for performance)
+        // PERFORMANCE OPTIMIZATION: Only get session count for initial load
+        // Full session parsing will be done when project is selected
         try {
-          const sessionResult = await getSessions(entry.name, 5, 0);
-          project.sessions = sessionResult.sessions || [];
+          const projectPath = path.join(claudeDir, entry.name);
+          const files = await fs.readdir(projectPath);
+          const sessionCount = files.filter(file => file.endsWith('.jsonl')).length;
+          
+          project.sessions = []; // Empty for performance - loaded on demand
           project.sessionMeta = {
-            hasMore: sessionResult.hasMore,
-            total: sessionResult.total
+            hasMore: sessionCount > 5,
+            total: sessionCount
           };
         } catch (e) {
-          console.warn(`Could not load sessions for project ${entry.name}:`, e.message);
+          console.warn(`Could not count sessions for project ${entry.name}:`, e.message);
+          project.sessions = [];
+          project.sessionMeta = { hasMore: false, total: 0 };
         }
         
         projects.push(project);
@@ -336,7 +355,8 @@ async function parseJsonlSessions(filePath) {
   const sessions = new Map();
   
   try {
-    // Explicitly set encoding to utf8 for proper handling of Japanese characters
+    // PERFORMANCE OPTIMIZATION: For initial project loading, only read first 100 lines
+    // This captures session metadata without processing entire conversation history
     const fileStream = fsSync.createReadStream(filePath, { encoding: 'utf8' });
     const rl = readline.createInterface({
       input: fileStream,
@@ -346,72 +366,79 @@ async function parseJsonlSessions(filePath) {
     // console.log(`[JSONL Parser] Reading file: ${filePath}`);
     let lineCount = 0;
     let errorCount = 0;
+    const maxLinesToProcess = 100; // OPTIMIZATION: Only read first 100 lines for project listing
     
     for await (const line of rl) {
-      if (line.trim()) {
-        lineCount++;
-        try {
-          const entry = JSON.parse(line);
-          
-          if (entry.sessionId) {
-            if (!sessions.has(entry.sessionId)) {
-              sessions.set(entry.sessionId, {
-                id: entry.sessionId,
-                summary: 'New Session',
-                messageCount: 0,
-                lastActivity: new Date(),
-                cwd: entry.cwd || ''
-              });
-            }
-            
-            const session = sessions.get(entry.sessionId);
-            
-            // Update summary if this is a summary entry
-            if (entry.type === 'summary' && entry.summary) {
-              session.summary = entry.summary;
-            } else if (entry.message?.role === 'user' && entry.message?.content && session.summary === 'New Session') {
-              // Use first user message as summary if no summary entry exists
-              const content = entry.message.content;
-              if (typeof content === 'string' && content.length > 0) {
-                // Skip command messages that start with <command-name>
-                if (!content.startsWith('<command-name>')) {
-                  session.summary = content.length > 50 ? content.substring(0, 50) + '...' : content;
-                }
-              }
-            }
-            
-            // Count messages instead of storing them all
-            session.messageCount = (session.messageCount || 0) + 1;
-            
-            // Update last activity
-            if (entry.timestamp) {
-              session.lastActivity = new Date(entry.timestamp);
-            }
-          }
-        } catch (parseError) {
+      if (++lineCount > maxLinesToProcess) {
+        break; // Stop early to improve performance
+      }
+      
+      const trimmedLine = line.trim();
+      
+      // Skip empty lines and lines that don't look like valid JSON
+      if (!trimmedLine || !trimmedLine.startsWith('{') || !trimmedLine.endsWith('}')) {
+        // Count non-JSON lines for debugging
+        if (trimmedLine && !trimmedLine.startsWith('{')) {
           errorCount++;
-          
-          // Only log errors in debug mode to reduce noise
-          if (process.env.NODE_ENV === 'development' && errorCount <= 5) {
-            console.warn(`[JSONL Parser] Error parsing line ${lineCount}: ${parseError.message}`);
-            
-            // Clean the line of null bytes and other control characters
-            const cleanLine = line.replace(/\u0000/g, '').replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-            const truncatedLine = cleanLine.length > 100 ? cleanLine.substring(0, 100) + '...' : cleanLine;
-            console.warn(`[JSONL Parser] Problematic line preview: ${truncatedLine}`);
-            
-            // Check for common JSON issues
-            if (line.includes('\u0000')) {
-              console.warn('[JSONL Parser] Line contains null bytes');
-            }
-            if (!cleanLine.endsWith('}') && !cleanLine.endsWith(']')) {
-              console.warn('[JSONL Parser] Line appears to be truncated');
-            }
+          if (process.env.NODE_ENV === 'development' && errorCount <= 3) {
+            console.warn(`[JSONL Parser] Skipping non-JSON line: ${trimmedLine.substring(0, 50)}...`);
           }
-          
-          // Skip this line and continue processing
+        }
+        continue;
+      }
+      
+      try {
+        const entry = JSON.parse(trimmedLine);
+        
+        // Validate entry structure - must have sessionId
+        if (!entry || typeof entry !== 'object' || !entry.sessionId) {
           continue;
         }
+        
+        if (!sessions.has(entry.sessionId)) {
+          sessions.set(entry.sessionId, {
+            id: entry.sessionId,
+            summary: 'New Session',
+            messageCount: 0,
+            lastActivity: new Date(),
+            cwd: entry.cwd || ''
+          });
+        }
+        
+        const session = sessions.get(entry.sessionId);
+        
+        // Update summary if this is a summary entry
+        if (entry.type === 'summary' && entry.summary) {
+          session.summary = entry.summary;
+        } else if (entry.message?.role === 'user' && entry.message?.content && session.summary === 'New Session') {
+          // Use first user message as summary if no summary entry exists
+          const content = entry.message.content;
+          if (typeof content === 'string' && content.length > 0) {
+            // Skip command messages that start with <command-name>
+            if (!content.startsWith('<command-name>')) {
+              session.summary = content.length > 50 ? content.substring(0, 50) + '...' : content;
+            }
+          }
+        }
+        
+        // Count messages instead of storing them all
+        session.messageCount = (session.messageCount || 0) + 1;
+        
+        // Update last activity
+        if (entry.timestamp) {
+          session.lastActivity = new Date(entry.timestamp);
+        }
+      } catch (parseError) {
+        errorCount++;
+        
+        // Only log first few errors to avoid spam
+        if (process.env.NODE_ENV === 'development' && errorCount <= 3) {
+          console.warn(`[JSONL Parser] JSON parse error on line ${lineCount}: ${parseError.message}`);
+          console.warn(`[JSONL Parser] Line preview: ${trimmedLine.substring(0, 100)}...`);
+        }
+        
+        // Skip this line and continue processing
+        continue;
       }
     }
     
@@ -456,16 +483,27 @@ async function getSessionMessages(projectName, sessionId) {
       
       let lineCount = 0;
       for await (const line of rl) {
-        if (line.trim()) {
+        const trimmedLine = line.trim();
+        if (trimmedLine && trimmedLine.startsWith('{') && trimmedLine.endsWith('}')) {
           lineCount++;
           try {
-            const entry = JSON.parse(line);
-            if (entry.sessionId === sessionId) {
+            // Parse the JSON without cleaning to preserve original content
+            const entry = JSON.parse(trimmedLine);
+            
+            // Validate entry structure
+            if (entry && typeof entry === 'object' && entry.sessionId === sessionId) {
               messages.push(entry);
             }
           } catch (parseError) {
-            console.warn(`[JSONL Parser] Error parsing line ${lineCount} in ${file}: ${parseError.message}`);
+            // Skip broken lines but log them for debugging
+            console.warn(`[JSONL Parser] Skipping broken line ${lineCount} in ${file}:`, parseError.message);
+            if (process.env.NODE_ENV === 'development') {
+              console.warn(`[JSONL Parser] Line preview:`, trimmedLine.substring(0, 100) + '...');
+            }
           }
+        } else if (trimmedLine && !trimmedLine.startsWith('{')) {
+          // This is likely a continuation of a broken JSON line, skip it
+          console.warn(`[JSONL Parser] Skipping non-JSON line ${lineCount} in ${file}`);
         }
       }
     }

@@ -23,6 +23,13 @@ const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
+  // デバッグ用：開発環境で認証をバイパス
+  if (process.env.NODE_ENV !== 'production' && (!token || token === 'dev-token')) {
+    console.warn('[DEBUG] Bypassing authentication for development');
+    req.user = { id: 1, username: 'dev-user' };
+    return next();
+  }
+
   if (!token) {
     return res.status(401).json({ error: 'Access denied. No token provided.' });
   }

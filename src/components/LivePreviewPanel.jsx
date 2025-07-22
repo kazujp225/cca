@@ -317,7 +317,7 @@ function LivePreviewPanel({
                         
                         return (
                           <button
-                            key={command.name}
+                            key={`${command.name}-${index}`}
                             onClick={() => handleScriptChange(command.name)}
                             className={`flex items-center p-3 text-left border rounded-lg transition-all ${
                               selectedScript === command.name

@@ -154,7 +154,8 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                 </div>
                 {message.toolInput && message.toolName === 'Edit' && (() => {
                   try {
-                    const input = JSON.parse(message.toolInput);
+                    const cleanToolInput = message.toolInput.replace(/\u0000/g, '').replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+                    const input = JSON.parse(cleanToolInput);
                     if (input.file_path && input.old_string && input.new_string) {
                       return (
                         <details className="mt-2" open={autoExpandTools}>
@@ -253,7 +254,8 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                       let input;
                       // Handle both JSON string and already parsed object
                       if (typeof message.toolInput === 'string') {
-                        input = JSON.parse(message.toolInput);
+                        const cleanToolInput = message.toolInput.replace(/\u0000/g, '').replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+                        input = JSON.parse(cleanToolInput);
                       } else {
                         input = message.toolInput;
                       }
@@ -1017,6 +1019,27 @@ const ImageAttachment = ({ file, onRemove, uploadProgress, error }) => {
 // - onReplaceTemporarySession: Called to replace temporary session ID with real WebSocket session ID
 //
 // This ensures uninterrupted chat experience by pausing sidebar refreshes during conversations.
+// LocalStorage cleanup utility
+const cleanupLocalStorage = () => {
+  try {
+    const totalSize = new Blob(Object.values(localStorage)).size;
+    console.log(`[ChatInterface] Current localStorage size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
+    
+    // Remove old chat messages
+    const keysToRemove = [];
+    Object.keys(localStorage).forEach(key => {
+      if (key.startsWith('chat_messages_') || key.startsWith('draft_input_')) {
+        keysToRemove.push(key);
+      }
+    });
+    
+    keysToRemove.forEach(key => localStorage.removeItem(key));
+    console.log(`[ChatInterface] Cleaned up ${keysToRemove.length} old entries from localStorage`);
+  } catch (error) {
+    console.error('[ChatInterface] Error during localStorage cleanup:', error);
+  }
+};
+
 function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, messages, onFileOpen, onInputFocusChange, onSessionActive, onSessionInactive, onReplaceTemporarySession, onNavigateToSession, onShowSettings, autoExpandTools, showRawParameters, autoScrollToBottom }) {
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
@@ -1027,7 +1050,16 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [chatMessages, setChatMessages] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
       const saved = localStorage.getItem(`chat_messages_${selectedProject.name}`);
-      return saved ? JSON.parse(saved) : [];
+      if (saved) {
+        try {
+          const cleanSaved = saved.replace(/\u0000/g, '').replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+          return JSON.parse(cleanSaved);
+        } catch (error) {
+          console.error('Error parsing saved chat messages:', error);
+          return [];
+        }
+      }
+      return [];
     }
     return [];
   });
@@ -1091,14 +1123,30 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     try {
       const response = await api.sessionMessages(projectName, sessionId);
       if (!response.ok) {
-        throw new Error('セッションメッセージの読み込みに失敗しました');
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        console.error('セッションメッセージの読み込みエラー:', errorData);
+        throw new Error(errorData.error || 'セッションメッセージの読み込みに失敗しました');
       }
       const data = await response.json();
       const messages = data.messages || [];
-      console.log(`[ChatInterface] Loaded ${messages.length} messages for session ${sessionId}:`, messages);
-      return messages;
+      console.log(`[ChatInterface] Loaded ${messages.length} messages for session ${sessionId}`);
+      
+      // Validate messages structure
+      const validMessages = messages.filter(msg => {
+        if (!msg || typeof msg !== 'object') {
+          console.warn('Invalid message format:', msg);
+          return false;
+        }
+        return true;
+      });
+      
+      return validMessages;
     } catch (error) {
       console.error('Error loading session messages:', error);
+      // Show user-friendly error message
+      if (error.message && error.message !== 'Unknown error') {
+        console.error('具体的なエラー:', error.message);
+      }
       return [];
     }
   }, []);
@@ -1267,6 +1315,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   }, [isNearBottom]);
 
+  // Cleanup localStorage on component mount to prevent quota issues
+  useEffect(() => {
+    cleanupLocalStorage();
+  }, []);
+
   useEffect(() => {
     // Load session messages when session changes
     const loadMessages = async () => {
@@ -1284,7 +1337,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           setChatMessages([]);
           
           try {
+            console.log(`[ChatInterface] Loading messages for project: ${selectedProject.name}, session: ${selectedSession.id}`);
             const messages = await loadSessionMessages(selectedProject.name, selectedSession.id);
+            console.log(`[ChatInterface] Loaded ${messages.length} raw messages`);
             setSessionMessages(messages);
             
             // Convert and set messages immediately
@@ -1310,6 +1365,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       }
     };
     
+    console.log('[ChatInterface] useEffect triggered:', {
+      selectedSession: selectedSession?.id,
+      selectedProject: selectedProject?.name,
+      isSystemSessionChange
+    });
     loadMessages();
   }, [selectedSession, selectedProject, scrollToBottom, isSystemSessionChange]);
 
@@ -1329,10 +1389,43 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   }, [input, selectedProject]);
 
-  // Persist chat messages to localStorage
+  // Persist chat messages to localStorage with quota management
   useEffect(() => {
     if (selectedProject && chatMessages.length > 0) {
-      localStorage.setItem(`chat_messages_${selectedProject.name}`, JSON.stringify(chatMessages));
+      try {
+        // Limit storage to recent messages only to avoid quota errors
+        const messagesToStore = chatMessages.slice(-50); // Store only last 50 messages
+        const storageKey = `chat_messages_${selectedProject.name}`;
+        
+        // Estimate size before storing
+        const dataSize = JSON.stringify(messagesToStore).length;
+        if (dataSize > 2 * 1024 * 1024) { // If larger than 2MB, store even fewer
+          const veryRecentMessages = chatMessages.slice(-20);
+          localStorage.setItem(storageKey, JSON.stringify(veryRecentMessages));
+        } else {
+          localStorage.setItem(storageKey, JSON.stringify(messagesToStore));
+        }
+      } catch (error) {
+        if (error.name === 'QuotaExceededError') {
+          console.warn('[ChatInterface] LocalStorage quota exceeded, clearing old chat data');
+          // Clear old chat messages from localStorage
+          const keys = Object.keys(localStorage);
+          keys.forEach(key => {
+            if (key.startsWith('chat_messages_')) {
+              localStorage.removeItem(key);
+            }
+          });
+          // Try again with only current session's recent messages
+          try {
+            const recentMessages = chatMessages.slice(-10);
+            localStorage.setItem(`chat_messages_${selectedProject.name}`, JSON.stringify(recentMessages));
+          } catch (retryError) {
+            console.error('[ChatInterface] Failed to store messages even after cleanup:', retryError);
+          }
+        } else {
+          console.error('[ChatInterface] Error storing chat messages:', error);
+        }
+      }
     }
   }, [chatMessages, selectedProject]);
 
@@ -2154,11 +2247,46 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           </div>
         ) : chatMessages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
-            <div className="text-center text-gray-500 dark:text-gray-400 px-6 sm:px-4">
-              <p className="font-bold text-lg sm:text-xl mb-3">Claudeと会話を始める</p>
-              <p className="text-sm sm:text-base leading-relaxed">
-                コードについて質問したり、変更を依頼したり、開発タスクのヘルプを求めたりできます
-              </p>
+            <div className="text-center text-gray-500 dark:text-gray-400 px-6 sm:px-4 max-w-md">
+              <div className="mb-6">
+                <ClaudeLogo size="medium" />
+              </div>
+              <p className="font-bold text-lg sm:text-xl mb-4">Claude Code UI へようこそ！</p>
+              
+              {selectedSession ? (
+                <div>
+                  <p className="text-sm sm:text-base leading-relaxed mb-4">
+                    セッション「{selectedSession.title || selectedSession.summary?.substring(0, 50) + '...' || selectedSession.id}」が選択されています
+                  </p>
+                  <p className="text-sm leading-relaxed">
+                    このセッションにメッセージがないか、まだ読み込まれていません。下の入力欄から会話を始めてください。
+                  </p>
+                </div>
+              ) : selectedProject ? (
+                <div>
+                  <p className="text-sm sm:text-base leading-relaxed mb-4">
+                    プロジェクト「{selectedProject.displayName || selectedProject.name}」が選択されています
+                  </p>
+                  <p className="text-sm leading-relaxed mb-2">
+                    👆 左のサイドバーからセッションを選択するか、
+                  </p>
+                  <p className="text-sm leading-relaxed">
+                    💬 下の入力欄から新しい会話を始めてください
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <p className="text-sm sm:text-base leading-relaxed mb-4">
+                    Claude Code UI で開発を始めましょう！
+                  </p>
+                  <p className="text-sm leading-relaxed mb-2">
+                    📂 まず左のサイドバーからプロジェクトを選択し、
+                  </p>
+                  <p className="text-sm leading-relaxed">
+                    💬 Claude との会話履歴を確認できます
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         ) : (

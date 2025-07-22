@@ -223,7 +223,12 @@ router.get('/branches', async (req, res) => {
     console.log('Git branches for project:', project, '-> path:', projectPath);
     
     // Validate git repository
-    await validateGitRepository(projectPath);
+    try {
+      await validateGitRepository(projectPath);
+    } catch (gitError) {
+      console.log('Git branches error:', gitError.message);
+      return res.status(200).json({ branches: [], error: gitError.message });
+    }
     
     // Get all branches
     const { stdout } = await execAsync('git branch -a', { cwd: projectPath });
